@@ -1,0 +1,94 @@
+# ---------------------------------------------------------
+# Python
+# ---------------------------------------------------------
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pkl
+*.pickle
+*.ipynb_checkpoints/
+
+# Virtual envs
+.env/
+.venv/
+venv/
+ENV/
+
+# ---------------------------------------------------------
+# Data
+# ---------------------------------------------------------
+data/
+datasets/
+*.csv
+*.tsv
+*.parquet
+*.feather
+*.jsonl
+*.h5
+*.npz
+*.npy
+*.pt
+*.pth
+*.ckpt
+
+# Intermediate artifacts
+*.log
+*.tmp
+*.cache/
+.cache/
+tmp/
+logs/
+outputs/
+artifacts/
+
+# ---------------------------------------------------------
+# ML / DL
+# ---------------------------------------------------------
+# Model weights
+*.bin
+*.safetensors
+*.onnx
+
+# HuggingFace
+huggingface/
+.checkpoints/
+runs/
+wandb/
+mlruns/
+
+# TensorBoard
+tensorboard/
+events.out.tfevents.*
+
+# Lightning
+lightning_logs/
+
+# ---------------------------------------------------------
+# Jupyter
+# ---------------------------------------------------------
+.ipynb_checkpoints/
+profile_default/
+ipython_config.py
+
+# ---------------------------------------------------------
+# System / Editor Stuff
+# ---------------------------------------------------------
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# ---------------------------------------------------------
+# Docker
+# ---------------------------------------------------------
+*.log
+*.pid
+*.pid.lock
+
+# ---------------------------------------------------------
+# Cache libs
+# ---------------------------------------------------------
+__pycache__/
+*.pytest_cache/
+*.mypy_cache/
