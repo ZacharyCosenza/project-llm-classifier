@@ -46,6 +46,8 @@ artifacts/
 # ML / DL
 # ---------------------------------------------------------
 # Model weights
+/weights
+/checkpoints
 *.bin
 *.safetensors
 *.onnx
