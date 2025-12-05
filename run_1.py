@@ -10,7 +10,7 @@ from transformers import DistilBertTokenizer, DistilBertModel, DistilBertConfig
 # ----------------------------
 # Config
 # ----------------------------
-SMOKE_TEST = True  # <--- Set True for a quick run, False for full training
+SMOKE_TEST = False  # <--- Set True for a quick run, False for full training
 
 DATA_PATH = 'data/train.csv'
 WEIGHTS_DIR = "weights/distilbert"
