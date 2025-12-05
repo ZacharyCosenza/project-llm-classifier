@@ -8,6 +8,7 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
 from transformers import DistilBertTokenizer, DistilBertModel, DistilBertConfig
+from tqdm import tqdm
 
 # ------------------------------------------------------------
 # Argparse
@@ -23,6 +24,7 @@ def get_args():
     ap.add_argument("--smoke", action="store_true")
     ap.add_argument("--freeze_base", action="store_true")
     ap.add_argument("--max_length", type=int, default=512)
+    ap.add_argument("--resume_timestamp", type=str, default=None)
     return ap.parse_args()
 
 
@@ -48,8 +50,15 @@ def main():
     )
 
     # timestamped checkpoint folder
-    TIMESTAMP = time.strftime("%Y%m%d_%H%M%S")
-    CKPT_DIR = os.path.join(ROOT_CKPT, TIMESTAMP)
+    # determine checkpoint directory (new run or resume)
+    if args.resume_timestamp is None:
+        TIMESTAMP = time.strftime("%Y%m%d_%H%M%S")
+        CKPT_DIR = os.path.join(ROOT_CKPT, TIMESTAMP)
+    else:
+        TIMESTAMP = args.resume_timestamp
+        CKPT_DIR = os.path.join(ROOT_CKPT, TIMESTAMP)
+        if not os.path.isdir(CKPT_DIR):
+            raise ValueError(f"Checkpoint directory {CKPT_DIR} does not exist.")
     os.makedirs(CKPT_DIR, exist_ok=True)
     os.makedirs(WEIGHTS_DIR, exist_ok=True)
 
@@ -148,51 +157,47 @@ def main():
                 return self.head(h)
 
         model = ResponseScorer(base_model).to(DEVICE)
+        
+        start_epoch = 1
+        latest_ckpt = None
+
+        if args.resume_timestamp is not None:
+            files = [f for f in os.listdir(CKPT_DIR) if f.startswith("epoch") and f.endswith(".pt")]
+            if len(files) > 0:
+                # sort by epoch number
+                files.sort(key=lambda x: int(x.replace("epoch", "").replace(".pt", "")))
+                latest_ckpt = files[-1]
+                start_epoch = int(latest_ckpt.replace("epoch", "").replace(".pt", "")) + 1
+                log(f"Resuming from {latest_ckpt}, starting at epoch {start_epoch}")
+                model.load_state_dict(torch.load(os.path.join(CKPT_DIR, latest_ckpt), map_location=DEVICE))
+            else:
+                log("Resume timestamp given, but no checkpoints found. Starting from scratch.")
+  
         optimizer = torch.optim.AdamW(model.parameters(), lr=LR)
         loss_fn = nn.CrossEntropyLoss()
 
         log("Model constructed.")
 
+        if start_epoch > NUM_EPOCHS:
+            log(f"start_epoch={start_epoch} > epochs={NUM_EPOCHS} — skipping training, running test only.")
+            goto_test_only = True
+        else:
+            goto_test_only = False
+
         # ----------------------------
         # Training
         # ----------------------------
-        train_stats, val_stats = [], []
+        if not goto_test_only:
+            train_stats, val_stats = [], []
 
-        for epoch in range(1, NUM_EPOCHS+1):
-            log(f"Epoch {epoch} starting...")
-            model.train()
-            running_loss = 0
+            for epoch in range(start_epoch, NUM_EPOCHS + 1):
+                log(f"Epoch {epoch} starting...")
+                model.train()
+                running_loss = 0
+                train_pbar = tqdm(train_loader, desc=f"Train {epoch}", leave=False)
 
-            for i, batch in enumerate(train_loader):
-                optimizer.zero_grad()
-                ids_a = batch["input_ids_a"].to(DEVICE)
-                mask_a = batch["attention_mask_a"].to(DEVICE)
-                ids_b = batch["input_ids_b"].to(DEVICE)
-                mask_b = batch["attention_mask_b"].to(DEVICE)
-                labels = batch["label"].to(DEVICE)
-
-                logits = model(ids_a, mask_a, ids_b, mask_b)
-                loss = loss_fn(logits, labels)
-                loss.backward()
-                optimizer.step()
-
-                # ---- per-batch metrics ----
-                preds = logits.argmax(dim=-1)
-                acc = (preds == labels).float().mean().item()
-                log(f"[train] batch={i} loss={loss.item():.4f} acc={acc:.4f}")
-
-                running_loss += loss.item()
-
-                if SMOKE_TEST:
-                    break
-
-            avg_train = running_loss / (1 if SMOKE_TEST else len(train_loader))
-
-            # validation
-            model.eval()
-            val_loss, correct, total = 0, 0, 0
-            with torch.no_grad():
-                for i, batch in enumerate(val_loader):
+                for batch in train_pbar:
+                    optimizer.zero_grad()
                     ids_a = batch["input_ids_a"].to(DEVICE)
                     mask_a = batch["attention_mask_a"].to(DEVICE)
                     ids_b = batch["input_ids_b"].to(DEVICE)
@@ -201,36 +206,64 @@ def main():
 
                     logits = model(ids_a, mask_a, ids_b, mask_b)
                     loss = loss_fn(logits, labels)
-                    preds = logits.argmax(dim=-1)
-
-                    val_loss += loss.item()
-                    correct += (preds == labels).sum().item()
-                    total += labels.size(0)
+                    loss.backward()
+                    optimizer.step()
 
                     # ---- per-batch metrics ----
-                    batch_acc = (preds == labels).float().mean().item()
-                    log(f"[val]   batch={i} loss={loss.item():.4f} acc={batch_acc:.4f}")
+                    preds = logits.argmax(dim=-1)
+                    acc = (preds == labels).float().mean().item()
+                    running_loss += loss.item()
 
                     if SMOKE_TEST:
                         break
+                        
+                    train_pbar.set_postfix(loss=loss.item(), acc=acc)
 
-            avg_val = val_loss / (1 if SMOKE_TEST else len(val_loader))
-            val_acc = correct / total
+                avg_train = running_loss / (1 if SMOKE_TEST else len(train_loader))
 
-            log(f"Epoch {epoch} done. Train={avg_train:.4f}, Val={avg_val:.4f}, Acc={val_acc:.4f}")
+                # validation
+                model.eval()
+                val_loss, correct, total = 0, 0, 0
+                with torch.no_grad():
+                    val_pbar = tqdm(val_loader, desc=f"Val {epoch}", leave=False)
+                    for batch in val_pbar:
+                        ids_a = batch["input_ids_a"].to(DEVICE)
+                        mask_a = batch["attention_mask_a"].to(DEVICE)
+                        ids_b = batch["input_ids_b"].to(DEVICE)
+                        mask_b = batch["attention_mask_b"].to(DEVICE)
+                        labels = batch["label"].to(DEVICE)
 
-            train_stats.append({"epoch": epoch, "loss": avg_train})
-            val_stats.append({"epoch": epoch, "loss": avg_val, "acc": val_acc})
+                        logits = model(ids_a, mask_a, ids_b, mask_b)
+                        loss = loss_fn(logits, labels)
+                        preds = logits.argmax(dim=-1)
+
+                        val_loss += loss.item()
+                        correct += (preds == labels).sum().item()
+                        total += labels.size(0)
+                        batch_acc = (preds == labels).float().mean().item()
+
+                        if SMOKE_TEST:
+                            break
+
+                        val_pbar.set_postfix(loss=loss.item(), acc=batch_acc)
+
+                avg_val = val_loss / (1 if SMOKE_TEST else len(val_loader))
+                val_acc = correct / total
+
+                log(f"Epoch {epoch} done. Train={avg_train:.4f}, Val={avg_val:.4f}, Acc={val_acc:.4f}")
+
+                train_stats.append({"epoch": epoch, "loss": avg_train})
+                val_stats.append({"epoch": epoch, "loss": avg_val, "acc": val_acc})
+
+                if not SMOKE_TEST:
+                    ckpt_path = os.path.join(CKPT_DIR, f"epoch{epoch}.pt")
+                    torch.save(model.state_dict(), ckpt_path)
+                    log(f"Saved checkpoint {ckpt_path}")
 
             if not SMOKE_TEST:
-                ckpt_path = os.path.join(CKPT_DIR, f"epoch{epoch}.pt")
-                torch.save(model.state_dict(), ckpt_path)
-                log(f"Saved checkpoint {ckpt_path}")
-
-        if not SMOKE_TEST:
-            pd.DataFrame(train_stats).to_csv(os.path.join(CKPT_DIR, "train.csv"), index=False)
-            pd.DataFrame(val_stats).to_csv(os.path.join(CKPT_DIR, "val.csv"), index=False)
-            log("Saved training CSVs.")
+                pd.DataFrame(train_stats).to_csv(os.path.join(CKPT_DIR, "train.csv"), index=False)
+                pd.DataFrame(val_stats).to_csv(os.path.join(CKPT_DIR, "val.csv"), index=False)
+                log("Saved training CSVs.")
 
         # ----------------------------
         # Test
@@ -241,7 +274,8 @@ def main():
         test_stats = []
 
         with torch.no_grad():
-            for i, batch in enumerate(test_loader):
+            test_pbar = tqdm(test_loader, desc="Test", leave=False)
+            for batch in test_pbar:
                 ids_a = batch["input_ids_a"].to(DEVICE)
                 mask_a = batch["attention_mask_a"].to(DEVICE)
                 ids_b = batch["input_ids_b"].to(DEVICE)
@@ -254,11 +288,10 @@ def main():
 
                 test_loss += loss.item()
                 correct += (preds == labels).sum().item()
+                total += labels.size(0)
 
                 # ---- per-batch metrics ----
                 acc = (preds == labels).float().mean().item()
-                log(f"[test]  batch={i} loss={loss.item():.4f} acc={acc:.4f}")
-
                 test_stats.append({"loss": loss.item(), "acc": acc})
 
                 if SMOKE_TEST:
