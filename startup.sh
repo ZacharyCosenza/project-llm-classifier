@@ -9,4 +9,5 @@ pip install scikit-learn
 pip install torch
 pip install huggingface
 pip install kaggle
+export KAGGLE_API_TOKEN=KGAT_47fa0afab6edd8f9a7856ed3ae7a05c8
 kaggle competitions download -c llm-classification-finetuning
