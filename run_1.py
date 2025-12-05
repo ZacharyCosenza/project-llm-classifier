@@ -1,5 +1,7 @@
 import os
 import time
+import argparse
+import traceback
 import pandas as pd
 import torch
 import torch.nn as nn
@@ -7,188 +9,262 @@ from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
 from transformers import DistilBertTokenizer, DistilBertModel, DistilBertConfig
 
-# ----------------------------
-# Config
-# ----------------------------
-SMOKE_TEST = False  # <--- Set True for a quick run, False for full training
+# ------------------------------------------------------------
+# Argparse
+# ------------------------------------------------------------
+def get_args():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--data_path", type=str, default="data/train.csv")
+    ap.add_argument("--weights_dir", type=str, default="weights/distilbert")
+    ap.add_argument("--checkpoint_dir", type=str, default="checkpoints")
+    ap.add_argument("--epochs", type=int, default=3)
+    ap.add_argument("--batch", type=int, default=32)
+    ap.add_argument("--lr", type=float, default=1e-5)
+    ap.add_argument("--smoke", action="store_true")
+    ap.add_argument("--freeze_base", action="store_true")
+    ap.add_argument("--max_length", type=int, default=512)
+    return ap.parse_args()
 
-DATA_PATH = 'data/train.csv'
-WEIGHTS_DIR = "weights/distilbert"
-CHECKPOINT_DIR = "checkpoints"
-BATCH_SIZE = 2 if not SMOKE_TEST else 1
-NUM_EPOCHS = 3 if not SMOKE_TEST else 1
-LR = 1e-5
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else
-                      "xpu" if hasattr(torch, 'xpu') and torch.xpu.is_available() else "cpu")
-TIMESTAMP = time.strftime("%Y%m%d_%H%M%S")
 
-os.makedirs(WEIGHTS_DIR, exist_ok=True)
-os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+# ------------------------------------------------------------
+# Script
+# ------------------------------------------------------------
+def main():
+    args = get_args()
 
-# ----------------------------
-# Data
-# ----------------------------
-df = pd.read_csv(DATA_PATH)
-tokenizer = DistilBertTokenizer.from_pretrained("distilbert-base-uncased")
+    SMOKE_TEST = args.smoke
+    DATA_PATH = args.data_path
+    WEIGHTS_DIR = args.weights_dir
+    ROOT_CKPT = args.checkpoint_dir
+    LR = args.lr
+    MAX_LEN = args.max_length
 
-class ResponseDataset(Dataset):
-    def __init__(self, df, max_length=128):
-        self.df = df
-        self.max_length = max_length
+    BATCH_SIZE = 1 if SMOKE_TEST else args.batch
+    NUM_EPOCHS = 1 if SMOKE_TEST else args.epochs
 
-    def outcome_to_class(self, row):
-        if row["winner_model_a"] == 1: return 2
-        if row["winner_model_b"] == 1: return 0
-        return 1
+    DEVICE = torch.device(
+        "cuda" if torch.cuda.is_available() else
+        ("xpu" if hasattr(torch, "xpu") and torch.xpu.is_available() else "cpu")
+    )
 
-    def __len__(self): return len(self.df)
-    
-    def __getitem__(self, idx):
-        row = self.df.iloc[idx]
-        tokens_a = tokenizer(row["response_a"], max_length=self.max_length, padding="max_length", truncation=True, return_tensors="pt")
-        tokens_b = tokenizer(row["response_b"], max_length=self.max_length, padding="max_length", truncation=True, return_tensors="pt")
-        label = torch.tensor(self.outcome_to_class(row), dtype=torch.long)
-        return {
-            "input_ids_a": tokens_a["input_ids"].squeeze(0),
-            "attention_mask_a": tokens_a["attention_mask"].squeeze(0),
-            "input_ids_b": tokens_b["input_ids"].squeeze(0),
-            "attention_mask_b": tokens_b["attention_mask"].squeeze(0),
-            "label": label
-        }
+    # timestamped checkpoint folder
+    TIMESTAMP = time.strftime("%Y%m%d_%H%M%S")
+    CKPT_DIR = os.path.join(ROOT_CKPT, TIMESTAMP)
+    os.makedirs(CKPT_DIR, exist_ok=True)
+    os.makedirs(WEIGHTS_DIR, exist_ok=True)
 
-df_train, df_temp = train_test_split(df, test_size=0.1, random_state=42, shuffle=True)
-df_val, df_test = train_test_split(df_temp, test_size=0.5, random_state=42, shuffle=True)
+    log_path = os.path.join(CKPT_DIR, "run.log")
+    def log(msg):
+        print(msg)
+        with open(log_path, "a") as f:
+            f.write(msg + "\n")
 
-train_loader = DataLoader(ResponseDataset(df_train), batch_size=BATCH_SIZE, shuffle=True)
-val_loader = DataLoader(ResponseDataset(df_val), batch_size=BATCH_SIZE, shuffle=False)
-test_loader = DataLoader(ResponseDataset(df_test), batch_size=BATCH_SIZE, shuffle=False)
+    try:
+        log("=== START RUN ===")
+        log(f"device={DEVICE}, smoke={SMOKE_TEST}")
 
-# ----------------------------
-# Model
-# ----------------------------
-def get_base_model(weights='pretrained'):
-    if os.path.exists(os.path.join(WEIGHTS_DIR, "pytorch_model.bin")):
-        return DistilBertModel.from_pretrained(WEIGHTS_DIR)
-    elif weights == 'pretrained':
-        model = DistilBertModel.from_pretrained("distilbert-base-uncased")
-        if not SMOKE_TEST: model.save_pretrained(WEIGHTS_DIR)
-        return model
-    else:
-        return DistilBertModel(DistilBertConfig())
+        # ----------------------------
+        # Load data
+        # ----------------------------
+        log("Loading dataset...")
+        df = pd.read_csv(DATA_PATH)
+        tokenizer = DistilBertTokenizer.from_pretrained("distilbert-base-uncased")
 
-base_model = get_base_model()
+        class ResponseDataset(Dataset):
+            def __init__(self, df):
+                self.df = df
 
-class ResponseScorer(nn.Module):
-    def __init__(self, base_model, freeze_base=False):
-        super().__init__()
-        self.base = base_model
-        hidden = self.base.config.dim
-        self.head = nn.Sequential(
-            nn.Linear(hidden*2, hidden),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(hidden, hidden//2),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(hidden//2, 3)
-        )
-        if freeze_base:
-            for p in self.base.parameters(): p.requires_grad = False
+            def outcome_to_class(self, row):
+                if row["winner_model_a"] == 1: return 2
+                if row["winner_model_b"] == 1: return 0
+                return 1
 
-    def encode(self, ids, mask):
-        return self.base(input_ids=ids, attention_mask=mask).last_hidden_state[:,0,:]
+            def __len__(self): return len(self.df)
 
-    def forward(self, ids_a, mask_a, ids_b, mask_b):
-        h = torch.cat([self.encode(ids_a, mask_a), self.encode(ids_b, mask_b)], dim=-1)
-        return self.head(h)
+            def __getitem__(self, idx):
+                row = self.df.iloc[idx]
+                t_a = tokenizer(row["response_a"], max_length=MAX_LEN, padding="max_length",
+                                truncation=True, return_tensors="pt")
+                t_b = tokenizer(row["response_b"], max_length=MAX_LEN, padding="max_length",
+                                truncation=True, return_tensors="pt")
+                label = torch.tensor(self.outcome_to_class(row), dtype=torch.long)
+                return {
+                    "input_ids_a": t_a["input_ids"].squeeze(0),
+                    "attention_mask_a": t_a["attention_mask"].squeeze(0),
+                    "input_ids_b": t_b["input_ids"].squeeze(0),
+                    "attention_mask_b": t_b["attention_mask"].squeeze(0),
+                    "label": label
+                }
 
-model = ResponseScorer(base_model).to(DEVICE)
-optimizer = torch.optim.AdamW(model.parameters(), lr=LR)
-loss_fn = nn.CrossEntropyLoss()
+        # split
+        df_train, df_temp = train_test_split(df, test_size=0.1, random_state=42)
+        df_val, df_test = train_test_split(df_temp, test_size=0.5, random_state=42)
 
-# ----------------------------
-# Training
-# ----------------------------
-train_stats, val_stats = [], []
+        train_loader = DataLoader(ResponseDataset(df_train), batch_size=BATCH_SIZE, shuffle=True)
+        val_loader = DataLoader(ResponseDataset(df_val), batch_size=BATCH_SIZE, shuffle=False)
+        test_loader = DataLoader(ResponseDataset(df_test), batch_size=BATCH_SIZE, shuffle=False)
 
-for epoch in range(1, NUM_EPOCHS+1):
-    model.train()
-    running_loss = 0
-    for i, batch in enumerate(train_loader, 1):
-        optimizer.zero_grad()
-        ids_a = batch["input_ids_a"].to(DEVICE)
-        mask_a = batch["attention_mask_a"].to(DEVICE)
-        ids_b = batch["input_ids_b"].to(DEVICE)
-        mask_b = batch["attention_mask_b"].to(DEVICE)
-        labels = batch["label"].to(DEVICE)
+        log("Dataset ready.")
 
-        logits = model(ids_a, mask_a, ids_b, mask_b)
-        loss = loss_fn(logits, labels)
-        loss.backward()
-        optimizer.step()
-        running_loss += loss.item()
+        # ----------------------------
+        # Model
+        # ----------------------------
+        def get_base_model():
+            if os.path.exists(os.path.join(WEIGHTS_DIR, "pytorch_model.bin")):
+                log("Loading local base model...")
+                return DistilBertModel.from_pretrained(WEIGHTS_DIR)
+            log("Downloading pretrained base model...")
+            model = DistilBertModel.from_pretrained("distilbert-base-uncased")
+            if not SMOKE_TEST:
+                model.save_pretrained(WEIGHTS_DIR)
+                log("Saved base model.")
+            return model
 
-        if SMOKE_TEST: break  # only one batch in smoke test
+        base_model = get_base_model()
 
-    avg_train_loss = running_loss / (1 if SMOKE_TEST else len(train_loader))
+        class ResponseScorer(nn.Module):
+            def __init__(self, base):
+                super().__init__()
+                self.base = base
+                hidden = base.config.dim
+                self.head = nn.Sequential(
+                    nn.Linear(hidden * 2, hidden),
+                    nn.ReLU(),
+                    nn.Dropout(0.1),
+                    nn.Linear(hidden, hidden // 2),
+                    nn.ReLU(),
+                    nn.Dropout(0.1),
+                    nn.Linear(hidden // 2, 3)
+                )
+                if args.freeze_base:
+                    for p in self.base.parameters(): p.requires_grad = False
 
-    # Validation
-    model.eval()
-    val_loss, correct, total = 0, 0, 0
-    with torch.no_grad():
-        for i, batch in enumerate(val_loader, 1):
-            ids_a = batch["input_ids_a"].to(DEVICE)
-            mask_a = batch["attention_mask_a"].to(DEVICE)
-            ids_b = batch["input_ids_b"].to(DEVICE)
-            mask_b = batch["attention_mask_b"].to(DEVICE)
-            labels = batch["label"].to(DEVICE)
-            logits = model(ids_a, mask_a, ids_b, mask_b)
-            val_loss += loss_fn(logits, labels).item()
-            preds = logits.argmax(dim=-1)
-            correct += (preds==labels).sum().item()
-            total += labels.size(0)
-            if SMOKE_TEST: break
+            def encode(self, ids, mask):
+                return self.base(input_ids=ids, attention_mask=mask).last_hidden_state[:, 0, :]
 
-    avg_val_loss = val_loss / (1 if SMOKE_TEST else len(val_loader))
-    val_acc = correct / total
-    train_stats.append({"epoch": epoch, "loss": avg_train_loss})
-    val_stats.append({"epoch": epoch, "loss": avg_val_loss, "accuracy": val_acc})
+            def forward(self, ids_a, mask_a, ids_b, mask_b):
+                h = torch.cat([self.encode(ids_a, mask_a),
+                               self.encode(ids_b, mask_b)], dim=-1)
+                return self.head(h)
 
-    print(f"Epoch {epoch} | Train Loss {avg_train_loss:.4f} | Val Loss {avg_val_loss:.4f} | Val Acc {val_acc:.4f}")
+        model = ResponseScorer(base_model).to(DEVICE)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=LR)
+        loss_fn = nn.CrossEntropyLoss()
 
-    # Save checkpoint
-    if not SMOKE_TEST:
-        ckpt_path = os.path.join(CHECKPOINT_DIR, f"{TIMESTAMP}_epoch{epoch}.pt")
-        torch.save(model.state_dict(), ckpt_path)
+        log("Model constructed.")
 
-# Save CSVs only if not smoke test
-if not SMOKE_TEST:
-    pd.DataFrame(train_stats).to_csv(f"train_stats_{TIMESTAMP}.csv", index=False)
-    pd.DataFrame(val_stats).to_csv(f"val_stats_{TIMESTAMP}.csv", index=False)
+        # ----------------------------
+        # Training
+        # ----------------------------
+        train_stats, val_stats = [], []
 
-# ----------------------------
-# Test
-# ----------------------------
-model.eval()
-test_loss, correct, total = 0, 0, 0
-test_stats = []
-with torch.no_grad():
-    for i, batch in enumerate(test_loader, 1):
-        ids_a = batch["input_ids_a"].to(DEVICE)
-        mask_a = batch["attention_mask_a"].to(DEVICE)
-        ids_b = batch["input_ids_b"].to(DEVICE)
-        mask_b = batch["attention_mask_b"].to(DEVICE)
-        labels = batch["label"].to(DEVICE)
-        logits = model(ids_a, mask_a, ids_b, mask_b)
-        test_loss += loss_fn(logits, labels).item()
-        preds = logits.argmax(dim=-1)
-        correct += (preds==labels).sum().item()
-        test_stats.append({"batch_loss": loss_fn(logits, labels).item(), "batch_acc": (preds==labels).float().mean().item()})
-        if SMOKE_TEST: break
+        for epoch in range(1, NUM_EPOCHS+1):
+            log(f"Epoch {epoch} starting...")
+            model.train()
+            running_loss = 0
 
-avg_test_loss = test_loss / (1 if SMOKE_TEST else len(test_loader))
-test_acc = correct / (1 if SMOKE_TEST else total)
-print(f"Test Loss: {avg_test_loss:.4f}, Test Acc: {test_acc:.4f}")
+            for i, batch in enumerate(train_loader):
+                optimizer.zero_grad()
+                ids_a = batch["input_ids_a"].to(DEVICE)
+                mask_a = batch["attention_mask_a"].to(DEVICE)
+                ids_b = batch["input_ids_b"].to(DEVICE)
+                mask_b = batch["attention_mask_b"].to(DEVICE)
+                labels = batch["label"].to(DEVICE)
 
-if not SMOKE_TEST:
-    pd.DataFrame(test_stats).to_csv(f"test_stats_{TIMESTAMP}.csv", index=False)
+                logits = model(ids_a, mask_a, ids_b, mask_b)
+                loss = loss_fn(logits, labels)
+                loss.backward()
+                optimizer.step()
+                running_loss += loss.item()
+
+                if SMOKE_TEST:
+                    log("Smoke batch done.")
+                    break
+
+            avg_train = running_loss / (1 if SMOKE_TEST else len(train_loader))
+
+            # validation
+            model.eval()
+            val_loss, correct, total = 0, 0, 0
+            with torch.no_grad():
+                for batch in val_loader:
+                    ids_a = batch["input_ids_a"].to(DEVICE)
+                    mask_a = batch["attention_mask_a"].to(DEVICE)
+                    ids_b = batch["input_ids_b"].to(DEVICE)
+                    mask_b = batch["attention_mask_b"].to(DEVICE)
+                    labels = batch["label"].to(DEVICE)
+
+                    logits = model(ids_a, mask_a, ids_b, mask_b)
+                    loss = loss_fn(logits, labels)
+                    val_loss += loss.item()
+                    preds = logits.argmax(dim=-1)
+                    correct += (preds == labels).sum().item()
+                    total += labels.size(0)
+                    if SMOKE_TEST:
+                        break
+
+            avg_val = val_loss / (1 if SMOKE_TEST else len(val_loader))
+            val_acc = correct / total
+
+            log(f"Epoch {epoch} done. Train={avg_train:.4f}, Val={avg_val:.4f}, Acc={val_acc:.4f}")
+
+            train_stats.append({"epoch": epoch, "loss": avg_train})
+            val_stats.append({"epoch": epoch, "loss": avg_val, "acc": val_acc})
+
+            if not SMOKE_TEST:
+                ckpt_path = os.path.join(CKPT_DIR, f"epoch{epoch}.pt")
+                torch.save(model.state_dict(), ckpt_path)
+                log(f"Saved checkpoint {ckpt_path}")
+
+        if not SMOKE_TEST:
+            pd.DataFrame(train_stats).to_csv(os.path.join(CKPT_DIR, "train.csv"), index=False)
+            pd.DataFrame(val_stats).to_csv(os.path.join(CKPT_DIR, "val.csv"), index=False)
+            log("Saved training CSVs.")
+
+        # ----------------------------
+        # Test
+        # ----------------------------
+        log("Testing...")
+        model.eval()
+        test_loss, correct, total = 0, 0, 0
+        test_stats = []
+
+        with torch.no_grad():
+            for batch in test_loader:
+                ids_a = batch["input_ids_a"].to(DEVICE)
+                mask_a = batch["attention_mask_a"].to(DEVICE)
+                ids_b = batch["input_ids_b"].to(DEVICE)
+                mask_b = batch["attention_mask_b"].to(DEVICE)
+                labels = batch["label"].to(DEVICE)
+
+                logits = model(ids_a, mask_a, ids_b, mask_b)
+                loss = loss_fn(logits, labels)
+                preds = logits.argmax(dim=-1)
+
+                test_loss += loss.item()
+                correct += (preds == labels).sum().item()
+                test_stats.append({"loss": loss.item(),
+                                   "acc": (preds == labels).float().mean().item()})
+
+                if SMOKE_TEST:
+                    break
+
+        avg_test_loss = test_loss / (1 if SMOKE_TEST else len(test_loader))
+        test_acc = correct / (1 if SMOKE_TEST else total)
+        log(f"Test done. Loss={avg_test_loss:.4f}, Acc={test_acc:.4f}")
+
+        if not SMOKE_TEST:
+            pd.DataFrame(test_stats).to_csv(os.path.join(CKPT_DIR, "test.csv"), index=False)
+
+        log("=== RUN COMPLETE ===")
+
+    except Exception as e:
+        err = traceback.format_exc()
+        with open(log_path, "a") as f:
+            f.write("\nERROR:\n" + err)
+        print(err)
+        raise
+
+
+if __name__ == "__main__":
+    main()
