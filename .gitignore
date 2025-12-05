@@ -48,6 +48,8 @@ artifacts/
 # Model weights
 /weights
 /checkpoints
+!checkpoints/
+!checkpoints/**/*.csv
 *.bin
 *.safetensors
 *.onnx
