@@ -175,10 +175,15 @@ def main():
                 loss = loss_fn(logits, labels)
                 loss.backward()
                 optimizer.step()
+
+                # ---- per-batch metrics ----
+                preds = logits.argmax(dim=-1)
+                acc = (preds == labels).float().mean().item()
+                log(f"[train] batch={i} loss={loss.item():.4f} acc={acc:.4f}")
+
                 running_loss += loss.item()
 
                 if SMOKE_TEST:
-                    log("Smoke batch done.")
                     break
 
             avg_train = running_loss / (1 if SMOKE_TEST else len(train_loader))
@@ -187,7 +192,7 @@ def main():
             model.eval()
             val_loss, correct, total = 0, 0, 0
             with torch.no_grad():
-                for batch in val_loader:
+                for i, batch in enumerate(val_loader):
                     ids_a = batch["input_ids_a"].to(DEVICE)
                     mask_a = batch["attention_mask_a"].to(DEVICE)
                     ids_b = batch["input_ids_b"].to(DEVICE)
@@ -196,10 +201,16 @@ def main():
 
                     logits = model(ids_a, mask_a, ids_b, mask_b)
                     loss = loss_fn(logits, labels)
-                    val_loss += loss.item()
                     preds = logits.argmax(dim=-1)
+
+                    val_loss += loss.item()
                     correct += (preds == labels).sum().item()
                     total += labels.size(0)
+
+                    # ---- per-batch metrics ----
+                    batch_acc = (preds == labels).float().mean().item()
+                    log(f"[val]   batch={i} loss={loss.item():.4f} acc={batch_acc:.4f}")
+
                     if SMOKE_TEST:
                         break
 
@@ -230,7 +241,7 @@ def main():
         test_stats = []
 
         with torch.no_grad():
-            for batch in test_loader:
+            for i, batch in enumerate(test_loader):
                 ids_a = batch["input_ids_a"].to(DEVICE)
                 mask_a = batch["attention_mask_a"].to(DEVICE)
                 ids_b = batch["input_ids_b"].to(DEVICE)
@@ -243,8 +254,12 @@ def main():
 
                 test_loss += loss.item()
                 correct += (preds == labels).sum().item()
-                test_stats.append({"loss": loss.item(),
-                                   "acc": (preds == labels).float().mean().item()})
+
+                # ---- per-batch metrics ----
+                acc = (preds == labels).float().mean().item()
+                log(f"[test]  batch={i} loss={loss.item():.4f} acc={acc:.4f}")
+
+                test_stats.append({"loss": loss.item(), "acc": acc})
 
                 if SMOKE_TEST:
                     break
