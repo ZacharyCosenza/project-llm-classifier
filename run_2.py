@@ -89,10 +89,16 @@ def main():
 
             def __getitem__(self, idx):
                 row = self.df.iloc[idx]
-                t_a = tokenizer(row["response_a"], max_length=MAX_LEN, padding="max_length",
-                                truncation=True, return_tensors="pt")
-                t_b = tokenizer(row["response_b"], max_length=MAX_LEN, padding="max_length",
-                                truncation=True, return_tensors="pt")
+                full_a = row["prompt"] + row["response_a"]
+                full_b = row["prompt"] + row["response_b"]
+                t_a = tokenizer(
+                    full_a, max_length=MAX_LEN,
+                    padding="max_length", truncation=True, return_tensors="pt"
+                )
+                t_b = tokenizer(
+                    full_b, max_length=MAX_LEN,
+                    padding="max_length", truncation=True, return_tensors="pt"
+                )
                 label = torch.tensor(self.outcome_to_class(row), dtype=torch.long)
                 return {
                     "input_ids_a": t_a["input_ids"].squeeze(0),
