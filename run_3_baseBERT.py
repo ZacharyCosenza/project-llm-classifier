@@ -18,10 +18,9 @@ def get_args():
     ap.add_argument("--epochs", type=int, default=3)
     ap.add_argument("--batch", type=int, default=32)
     ap.add_argument("--smoke", action="store_true")
-    ap.add_argument("--freeze_base", action="store_true")
     ap.add_argument("--max_length", type=int, default=512)
     ap.add_argument("--resume_timestamp", type=str, default=None)
-    ap.add_argument("--base_model", type=str, default='distilbert')
+    ap.add_argument("--base_model", type=str, default='basebert')
     return ap.parse_args()
 
 
@@ -146,7 +145,7 @@ def main():
             def __init__(self, base):
                 super().__init__()
                 self.base = base
-                hidden = base.config.dim
+                hidden = base.config.hidden_size
                 self.head = nn.Sequential(
                     nn.Linear(hidden * 2, hidden),
                     nn.ReLU(),
@@ -156,8 +155,6 @@ def main():
                     nn.Dropout(0.1),
                     nn.Linear(hidden // 2, 3)
                 )
-                if args.freeze_base:
-                    for p in self.base.parameters(): p.requires_grad = False
 
             def encode(self, ids, mask):
                 return self.base(input_ids=ids, attention_mask=mask).last_hidden_state[:, 0, :]
