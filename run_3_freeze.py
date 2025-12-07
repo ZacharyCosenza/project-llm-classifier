@@ -142,7 +142,7 @@ def main():
         base_model = get_base_model()
 
         class ResponseScorer(nn.Module):
-            def __init__(self, base):
+            def __init__(self, base, freeze_base = True):
                 super().__init__()
                 self.base = base
                 hidden = base.config.hidden_size
@@ -155,6 +155,9 @@ def main():
                     nn.Dropout(0.1),
                     nn.Linear(hidden // 2, 3)
                 )
+                
+                if freeze_base:
+                    for p in self.base.parameters(): p.requires_grad = False
 
             def encode(self, ids, mask):
                 return self.base(input_ids=ids, attention_mask=mask).last_hidden_state[:, 0, :]
