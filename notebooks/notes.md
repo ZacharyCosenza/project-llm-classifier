@@ -18,6 +18,11 @@ Because I was using just the terminal to run experiments in the CPU/GPU machines
 
 This experiment just involved concatenating the prompt and response message and passing through the tokenization. This adds context at the expense of passing the max_length limit of the tokenizer/model combination. On my old local XPU this caused memory issues so I ran with batch size of 2 and only managed to get through a single epoch. Moving to the more powerful A40 I am able to using standard batch size 32 for 3 epochs without issue. Training finished in less than an hour with test accuracy of 47.3%. 
 
-# Let's scale the base LLM
+# Beyond the baseline
 
-Appending the prompt to the response is one way of improving performance more along the lines of more efficiently using the given model's context. Let's scale the model itself. Right now I'm using distilbert-base-uncased from Huggingface. According to https://arxiv.org/abs/1910.01108 distilbert has 66M parameters. 
+Appending the prompt to the response is one way of improving performance more along the lines of more efficiently using the given model's context. This will act as a good baseline. Right now I'm using distilbert-base-uncased from Huggingface. According to https://arxiv.org/abs/1910.01108 distilbert has 66M parameters. Let's run experiments along the following lines: (1) number of tuned parameters, (2) number of total parameters, (3) pre-training.
+
+For experiment set 1 using distilbert-base-uncased:
+- baseline: 47.3%
+- fully frozen:
+- bottom frozen

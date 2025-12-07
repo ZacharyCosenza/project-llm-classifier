@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
-from transformers import BertTokenizer, BertModel
+from transformers import BertTokenizer, BertModel, DistilBertTokenizer, DistilBertModel
 from tqdm import tqdm
 
 # ------------------------------------------------------------
@@ -18,9 +18,9 @@ def get_args():
     ap.add_argument("--epochs", type=int, default=3)
     ap.add_argument("--batch", type=int, default=32)
     ap.add_argument("--smoke", action="store_true")
-    ap.add_argument("--max_length", type=int, default=512)
     ap.add_argument("--resume_timestamp", type=str, default=None)
-    ap.add_argument("--base_model", type=str, default='basebert')
+    ap.add_argument("--base_model", type=str, default='distilbert')
+    ap.add_argument("--tag", type=str, default='')
     return ap.parse_args()
 
 
@@ -34,16 +34,19 @@ def main():
     DATA_PATH = 'data/train.csv'
     WEIGHTS_DIR = os.path.join('weights', args.base_model)
     ROOT_CKPT = 'checkpoints'
+    TAG = args.tag
     LR = 1e-5
     MAX_LEN = 512
     BASE_MODEL = args.base_model
 
     # Create model labels and parameters
     if BASE_MODEL == 'distilbert':
-        tokenizer_label = "distilbert-base-uncased"
+        tokenizer = DistilBertTokenizer.from_pretrained("distilbert-base-uncased")
+        model_class = DistilBertModel
         model_label = "distilbert-base-uncased"
     elif BASE_MODEL == 'basebert':
-        tokenizer_label = "bert-base-uncased"
+        tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+        model_class = BertModel
         model_label = "bert-base-uncased"
 
     BATCH_SIZE = 1 if SMOKE_TEST else args.batch
@@ -57,7 +60,7 @@ def main():
     # determine checkpoint directory (new run or resume)
     if args.resume_timestamp is None:
         TIMESTAMP = time.strftime("%Y%m%d_%H%M%S")
-        CKPT_DIR = os.path.join(ROOT_CKPT, TIMESTAMP)
+        CKPT_DIR = os.path.join(ROOT_CKPT, TIMESTAMP, TAG)
     else:
         TIMESTAMP = args.resume_timestamp
         CKPT_DIR = os.path.join(ROOT_CKPT, TIMESTAMP)
@@ -81,7 +84,7 @@ def main():
         # ----------------------------
         log("Loading dataset...")
         df = pd.read_csv(DATA_PATH)
-        tokenizer = BertTokenizer.from_pretrained(tokenizer_label)
+        
 
         class ResponseDataset(Dataset):
             def __init__(self, df):
@@ -128,24 +131,25 @@ def main():
         # ----------------------------
         # Model
         # ----------------------------
-        def get_base_model():
+        def get_base_model(model_class):
             if os.path.exists(os.path.join(WEIGHTS_DIR, "pytorch_model.bin")):
                 log("Loading local base model...")
-                return BertModel.from_pretrained(WEIGHTS_DIR)
+                return model_class.from_pretrained(WEIGHTS_DIR)
             log("Downloading pretrained base model...")
-            model = BertModel.from_pretrained(model_label)
+            model = model_class.from_pretrained(model_label)
             if not SMOKE_TEST:
                 model.save_pretrained(WEIGHTS_DIR)
                 log("Saved base model.")
             return model
 
-        base_model = get_base_model()
+        base_model = get_base_model(model_class)
 
         class ResponseScorer(nn.Module):
-            def __init__(self, base, freeze_base = True):
+            def __init__(self, base, freeze_mode=1, freeze_bottom_n=6):
                 super().__init__()
                 self.base = base
-                hidden = base.config.hidden_size
+                hidden = base.config.dim
+
                 self.head = nn.Sequential(
                     nn.Linear(hidden * 2, hidden),
                     nn.ReLU(),
@@ -155,16 +159,29 @@ def main():
                     nn.Dropout(0.1),
                     nn.Linear(hidden // 2, 3)
                 )
-                
-                if freeze_base:
-                    for p in self.base.parameters(): p.requires_grad = False
+
+                # --- Freeze strategy ---
+                if freeze_mode == 1:  
+                    for p in self.base.parameters():
+                        p.requires_grad = False
+
+                elif freeze_mode == 2:
+                    for p in self.base.embeddings.parameters():
+                        p.requires_grad = False
+
+                elif freeze_mode == 3:
+                    encoder = self.base.encoder.layer
+                    n = min(freeze_bottom_n, len(encoder))
+                    for layer in encoder[:n]:
+                        for p in layer.parameters():
+                            p.requires_grad = False
 
             def encode(self, ids, mask):
                 return self.base(input_ids=ids, attention_mask=mask).last_hidden_state[:, 0, :]
 
             def forward(self, ids_a, mask_a, ids_b, mask_b):
                 h = torch.cat([self.encode(ids_a, mask_a),
-                               self.encode(ids_b, mask_b)], dim=-1)
+                            self.encode(ids_b, mask_b)], dim=-1)
                 return self.head(h)
 
         model = ResponseScorer(base_model).to(DEVICE)
