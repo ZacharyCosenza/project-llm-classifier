@@ -145,7 +145,7 @@ def main():
         base_model = get_base_model(model_class)
 
         class ResponseScorer(nn.Module):
-            def __init__(self, base, freeze_mode=1, freeze_bottom_n=6):
+            def __init__(self, base, freeze_mode=3, freeze_bottom_n=6):
                 super().__init__()
                 self.base = base
                 hidden = base.config.dim

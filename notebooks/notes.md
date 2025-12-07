@@ -24,5 +24,5 @@ Appending the prompt to the response is one way of improving performance more al
 
 For experiment set 1 using distilbert-base-uncased:
 - baseline: 47.3%
-- fully frozen:
+- fully frozen: 45.3%
 - bottom frozen
