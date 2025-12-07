@@ -166,7 +166,7 @@ def main():
                         p.requires_grad = False
                 elif freeze_mode == 'bottom':
                     encoder = self.base.transformer
-                    n = min(freeze_bottom_n, len(encoder))
+                    n = min(freeze_bottom_n, len(encoder.layer))
                     for layer in encoder.layer[:n]:
                         for p in layer.parameters():
                             p.requires_grad = False
