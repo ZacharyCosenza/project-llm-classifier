@@ -145,7 +145,7 @@ def main():
         base_model = get_base_model(model_class)
 
         class ResponseScorer(nn.Module):
-            def __init__(self, base, freeze_mode=3, freeze_bottom_n=6):
+            def __init__(self, base, freeze_mode=None, freeze_bottom_n=6):
                 super().__init__()
                 self.base = base
                 hidden = base.config.dim
@@ -161,20 +161,20 @@ def main():
                 )
 
                 # --- Freeze strategy ---
-                if freeze_mode == 1:  
+                if freeze_mode == 'all_llm':  
                     for p in self.base.parameters():
                         p.requires_grad = False
-
-                elif freeze_mode == 2:
-                    for p in self.base.embeddings.parameters():
-                        p.requires_grad = False
-
-                elif freeze_mode == 3:
-                    encoder = self.base.encoder.layer
+                elif freeze_mode == 'bottom':
+                    encoder = self.base.transformer
                     n = min(freeze_bottom_n, len(encoder))
-                    for layer in encoder[:n]:
+                    for layer in encoder.layer[:n]:
                         for p in layer.parameters():
                             p.requires_grad = False
+                elif freeze_mode == 'all':
+                    for p in self.base.parameters():
+                        p.requires_grad = False
+                    for p in self.head.parameters():
+                        p.requires_grad = False
 
             def encode(self, ids, mask):
                 return self.base(input_ids=ids, attention_mask=mask).last_hidden_state[:, 0, :]
