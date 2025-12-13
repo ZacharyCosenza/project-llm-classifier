@@ -13,6 +13,9 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 
+# Internal imports
+from core import ResponseDataset, ResponseScorer
+
 # ------------------------------------------------------------
 # Argparse
 # ------------------------------------------------------------
@@ -22,7 +25,7 @@ def get_args():
     ap.add_argument("--batch", type=int, default=32)
     ap.add_argument("--smoke", action="store_true")
     ap.add_argument("--resume_timestamp", type=str, default=None)
-    ap.add_argument("--base_model", type=str)
+    ap.add_argument("--base_model", type=str, default='distilbert-base-uncased')
     ap.add_argument("--tag", type=str, default='')
     return ap.parse_args()
 
@@ -103,45 +106,13 @@ def main():
         log("Loading dataset...")
         df = pd.read_csv(DATA_PATH)
 
-        class ResponseDataset(Dataset):
-            def __init__(self, df):
-                self.df = df
-
-            def outcome_to_class(self, row):
-                if row["winner_model_a"] == 1: return 2
-                if row["winner_model_b"] == 1: return 0
-                return 1
-
-            def __len__(self): return len(self.df)
-
-            def __getitem__(self, idx):
-                row = self.df.iloc[idx]
-                full_a = row["prompt"] + row["response_a"]
-                full_b = row["prompt"] + row["response_b"]
-                t_a = tokenizer(
-                    full_a, max_length=MAX_LEN,
-                    padding="max_length", truncation=True, return_tensors="pt"
-                )
-                t_b = tokenizer(
-                    full_b, max_length=MAX_LEN,
-                    padding="max_length", truncation=True, return_tensors="pt"
-                )
-                label = torch.tensor(self.outcome_to_class(row), dtype=torch.long)
-                return {
-                    "input_ids_a": t_a["input_ids"].squeeze(0),
-                    "attention_mask_a": t_a["attention_mask"].squeeze(0),
-                    "input_ids_b": t_b["input_ids"].squeeze(0),
-                    "attention_mask_b": t_b["attention_mask"].squeeze(0),
-                    "label": label
-                }
-
         # split
         df_train, df_temp = train_test_split(df, test_size=0.2, random_state=42)
         df_val, df_test = train_test_split(df_temp, test_size=0.5, random_state=42)
 
-        train_dataset = ResponseDataset(df_train)
-        val_dataset = ResponseDataset(df_val)
-        test_dataset = ResponseDataset(df_test)
+        train_dataset = ResponseDataset(df_train, tokenizer, MAX_LEN)
+        val_dataset = ResponseDataset(df_val, tokenizer, MAX_LEN)
+        test_dataset = ResponseDataset(df_test, tokenizer, MAX_LEN)
 
         if NUM_GPUS > 0:
             train_sampler = DistributedSampler(train_dataset)
@@ -176,38 +147,6 @@ def main():
             return model
 
         base_model = get_base_model(model_class)
-
-        class ResponseScorer(nn.Module):
-            def __init__(self, base):
-                super().__init__()
-                self.base = base
-
-                # Model specific parameters
-                if isinstance(self.base, DistilBertModel):
-                    hidden = self.base.config.dim
-                elif isinstance(self.base, BertModel):
-                    hidden = self.base.config.hidden_size
-                else:
-                    raise TypeError(f"Unsupported base model type: {type(self.base)}")
-
-                self.head = nn.Sequential(
-                    nn.Linear(hidden * 2, hidden),
-                    nn.ReLU(),
-                    nn.Dropout(0.1),
-                    nn.Linear(hidden, hidden // 2),
-                    nn.ReLU(),
-                    nn.Dropout(0.1),
-                    nn.Linear(hidden // 2, 3)
-                )
-
-            def encode(self, ids, mask):
-                return self.base(input_ids=ids, attention_mask=mask).last_hidden_state[:, 0, :]
-
-            def forward(self, ids_a, mask_a, ids_b, mask_b):
-                h = torch.cat([self.encode(ids_a, mask_a),
-                            self.encode(ids_b, mask_b)], dim=-1)
-                return self.head(h)
-
         model = ResponseScorer(base_model)
         if NUM_GPUS > 0: 
             model = model.to(rank)
