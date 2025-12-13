@@ -183,6 +183,12 @@ def main():
         # ----------------------------
         # Training
         # ----------------------------
+        
+        if NUM_GPUS > 0:
+            obj = rank
+        else:
+            obj = DEVICE
+
         if not goto_test_only:
             train_stats, val_stats = [], []
 
@@ -197,11 +203,11 @@ def main():
 
                 for batch in train_pbar:
                     optimizer.zero_grad()
-                    ids_a = batch["input_ids_a"].to(DEVICE)
-                    mask_a = batch["attention_mask_a"].to(DEVICE)
-                    ids_b = batch["input_ids_b"].to(DEVICE)
-                    mask_b = batch["attention_mask_b"].to(DEVICE)
-                    labels = batch["label"].to(DEVICE)
+                    ids_a = batch["input_ids_a"].to(obj)
+                    mask_a = batch["attention_mask_a"].to(obj)
+                    ids_b = batch["input_ids_b"].to(obj)
+                    mask_b = batch["attention_mask_b"].to(obj)
+                    labels = batch["label"].to(obj)
 
                     logits = model(ids_a, mask_a, ids_b, mask_b)
                     loss = loss_fn(logits, labels)
@@ -226,11 +232,11 @@ def main():
                 with torch.no_grad():
                     val_pbar = tqdm(val_loader, desc=f"Val {epoch}", leave=False)
                     for batch in val_pbar:
-                        ids_a = batch["input_ids_a"].to(DEVICE)
-                        mask_a = batch["attention_mask_a"].to(DEVICE)
-                        ids_b = batch["input_ids_b"].to(DEVICE)
-                        mask_b = batch["attention_mask_b"].to(DEVICE)
-                        labels = batch["label"].to(DEVICE)
+                        ids_a = batch["input_ids_a"].to(obj)
+                        mask_a = batch["attention_mask_a"].to(obj)
+                        ids_b = batch["input_ids_b"].to(obj)
+                        mask_b = batch["attention_mask_b"].to(obj)
+                        labels = batch["label"].to(obj)
 
                         logits = model(ids_a, mask_a, ids_b, mask_b)
                         loss = loss_fn(logits, labels)
@@ -275,11 +281,11 @@ def main():
         with torch.no_grad():
             test_pbar = tqdm(test_loader, desc="Test", leave=False)
             for batch in test_pbar:
-                ids_a = batch["input_ids_a"].to(DEVICE)
-                mask_a = batch["attention_mask_a"].to(DEVICE)
-                ids_b = batch["input_ids_b"].to(DEVICE)
-                mask_b = batch["attention_mask_b"].to(DEVICE)
-                labels = batch["label"].to(DEVICE)
+                ids_a = batch["input_ids_a"].to(obj)
+                mask_a = batch["attention_mask_a"].to(obj)
+                ids_b = batch["input_ids_b"].to(obj)
+                mask_b = batch["attention_mask_b"].to(obj)
+                labels = batch["label"].to(obj)
 
                 logits = model(ids_a, mask_a, ids_b, mask_b)
                 loss = loss_fn(logits, labels)

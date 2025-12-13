@@ -27,3 +27,10 @@ For experiment set 1 using distilbert-base-uncased:
 - baseline: 47.3%
 - fully frozen: 45.3%
 - bottom frozen: 46.9%
+
+Clearly training on more parameters has a positive effect on accuracy. As a next step we are trying out models with greater raw capacity such as BERT and a larger BERT. I also have started to organize the codebase now that some experiments are more steady (moving dataloader and model classes to core.py).
+
+For experiment set 2, using increasingly large bert models:
+- distilbert (small):
+- bert (default):
+- large bert 
