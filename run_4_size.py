@@ -137,21 +137,48 @@ def main():
         # Model
         # ----------------------------
         def get_base_model(model_class):
-            if os.path.exists(os.path.join(WEIGHTS_DIR, "pytorch_model.bin")):
-                log("Loading local base model...")
-                return model_class.from_pretrained(WEIGHTS_DIR)
-            log("Downloading pretrained base model...")
-            model = model_class.from_pretrained(BASE_MODEL)
-            if not SMOKE_TEST:
-                model.save_pretrained(WEIGHTS_DIR)
-                log("Saved base model.")
-            return model
+            try:
+                if os.path.exists(os.path.join(WEIGHTS_DIR, "pytorch_model.bin")):
+                    log(f"Rank {dist.get_rank() if dist.is_initialized() else 'N/A'}: Loading local base model from {WEIGHTS_DIR}")
+                    model = model_class.from_pretrained(WEIGHTS_DIR)
+                else:
+                    log(f"Rank {dist.get_rank() if dist.is_initialized() else 'N/A'}: Downloading pretrained base model...")
+                    model = model_class.from_pretrained(BASE_MODEL)
+                    # Only rank 0 should save to avoid race conditions
+                    if not SMOKE_TEST and (not dist.is_initialized() or dist.get_rank() == 0):
+                        model.save_pretrained(WEIGHTS_DIR)
+                        log("Saved base model.")
+                
+                # Verify model loaded correctly
+                num_params = sum(p.numel() for p in model.parameters())
+                log(f"Rank {dist.get_rank() if dist.is_initialized() else 'N/A'}: Base model loaded with {num_params} parameters")
+                
+                return model
+            except Exception as e:
+                log(f"Rank {dist.get_rank() if dist.is_initialized() else 'N/A'}: ERROR loading base model: {e}")
+                raise
 
         base_model = get_base_model(model_class)
+
+        # Add barrier to ensure all ranks finish loading before proceeding
+        if USE_DDP:
+            dist.barrier()
+            log(f"Rank {dist.get_rank()}: Passed barrier after model loading")
+
         model = ResponseScorer(base_model)
+
+        # Remove pooler if exists
+        if hasattr(model.base, 'pooler'):
+            model.base.pooler = None
+
         model = model.to(DEVICE)
-        if USE_DDP: 
-            model = DDP(model, device_ids=[DEVICE], find_unused_parameters=True)         
+
+        # Verify model on device
+        num_params = sum(p.numel() for p in model.parameters())
+        log(f"Rank {dist.get_rank() if USE_DDP else 'N/A'}: ResponseScorer has {num_params} parameters before DDP")
+
+        if USE_DDP:
+            model = DDP(model, device_ids=[DEVICE], find_unused_parameters=True)     
         
         start_epoch = 1
         latest_ckpt = None
