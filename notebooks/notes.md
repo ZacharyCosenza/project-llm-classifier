@@ -23,6 +23,7 @@ This experiment just involved concatenating the prompt and response message and 
 Appending the prompt to the response is one way of improving performance more along the lines of more efficiently using the given model's context. This will act as a good baseline. Right now I'm using distilbert-base-uncased from Huggingface. According to https://arxiv.org/abs/1910.01108 distilbert has 66M parameters. Let's run experiments along the following lines: (1) number of tuned parameters, (2) number of total parameters, (3) pre-training.
 
 For experiment set 1 using distilbert-base-uncased:
+- random: 35.1%
 - baseline: 47.3%
 - fully frozen: 45.3%
 - bottom frozen: 46.9%
