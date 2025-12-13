@@ -60,19 +60,21 @@ def main():
         NUM_GPUS = torch.cuda.device_count()
     if "LOCAL_RANK" in os.environ:
         DEVICE = int(os.environ["LOCAL_RANK"])
-        acc = torch.accelerator.current_accelerator()
-        backend = torch.distributed.get_default_backend_for_device(acc)
-        dist.init_process_group(backend, rank=DEVICE)
+        torch.cuda.set_device(DEVICE)  # Important: set the device
+        dist.init_process_group(backend="nccl")  # Remove rank parameter - torchrun handles it
+        USE_DDP = True
     elif NUM_GPUS >= 1:
         DEVICE = torch.device("cuda")
+        USE_DDP = False
     else:
         DEVICE = torch.device(
             "xpu" if hasattr(torch, "xpu") and torch.xpu.is_available() else "cpu"
-        ) 
+        )
+        USE_DDP = False
     if SMOKE_TEST:
         BATCH_SIZE = 1
     else:
-        if NUM_GPUS > 0:
+        if USE_DDP:
             BATCH_SIZE = max(1, args.batch // NUM_GPUS)
         else:
             BATCH_SIZE = args.batch
@@ -113,7 +115,7 @@ def main():
         val_dataset = ResponseDataset(df_val, tokenizer, MAX_LEN)
         test_dataset = ResponseDataset(df_test, tokenizer, MAX_LEN)
 
-        if NUM_GPUS > 0:
+        if USE_DDP:
             train_sampler = DistributedSampler(train_dataset, shuffle=False)
             val_sampler = DistributedSampler(val_dataset, shuffle=False)
             test_sampler = DistributedSampler(test_dataset, shuffle=False)
@@ -148,7 +150,7 @@ def main():
         base_model = get_base_model(model_class)
         model = ResponseScorer(base_model)
         model = model.to(DEVICE)
-        if NUM_GPUS > 0: 
+        if USE_DDP: 
             model = DDP(model, device_ids=[DEVICE], find_unused_parameters=True)         
         
         start_epoch = 1
@@ -190,7 +192,7 @@ def main():
                 running_loss = 0
                 train_pbar = tqdm(train_loader, desc=f"Train {epoch}", leave=False)
 
-                if NUM_GPUS > 0:
+                if USE_DDP:
                     train_sampler.set_epoch(epoch)
 
                 for batch in train_pbar:
