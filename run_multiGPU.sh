@@ -1,11 +1,13 @@
 #!/bin/bash
 
+# Instal tmux
+apt-get update && apt-get install tmux
+
 # Create timestamped session name
 SESSION="train_$(date +%Y%m%d_%H%M%S)"
 
 # Clean up any existing torchrun processes
 pkill -f "torchrun"
-lsof -ti:29500 | xargs kill -9 2>/dev/null
 sleep 1
 
 # Create new tmux session, run training, then detach
