@@ -207,7 +207,6 @@ def main():
         # ----------------------------
         # Training
         # ----------------------------
-        goto_test_only = True
         if not goto_test_only:
             train_stats, val_stats = [], []
 
