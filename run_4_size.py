@@ -59,8 +59,6 @@ def main():
     if torch.cuda.is_available():
         NUM_GPUS = torch.cuda.device_count()
     if NUM_GPUS == 1:
-        DEVICE = torch.device("cuda")
-    elif NUM_GPUS > 1:
         DEVICE = int(os.environ["LOCAL_RANK"])
         acc = torch.accelerator.current_accelerator()
         backend = torch.distributed.get_default_backend_for_device(acc)
