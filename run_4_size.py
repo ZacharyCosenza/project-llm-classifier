@@ -60,8 +60,8 @@ def main():
         NUM_GPUS = torch.cuda.device_count()
     if "LOCAL_RANK" in os.environ:
         DEVICE = int(os.environ["LOCAL_RANK"])
-        torch.cuda.set_device(DEVICE)  # Important: set the device
-        dist.init_process_group(backend="nccl")  # Remove rank parameter - torchrun handles it
+        torch.cuda.set_device(DEVICE)
+        dist.init_process_group(backend="gloo")
         USE_DDP = True
     elif NUM_GPUS >= 1:
         DEVICE = torch.device("cuda")
