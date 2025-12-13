@@ -115,7 +115,7 @@ def main():
         test_dataset = ResponseDataset(df_test, tokenizer, MAX_LEN)
 
         if NUM_GPUS > 0:
-            train_sampler = DistributedSampler(train_dataset)
+            train_sampler = DistributedSampler(train_dataset, shuffle=False)
             val_sampler = DistributedSampler(val_dataset, shuffle=False)
             test_sampler = DistributedSampler(test_dataset, shuffle=False)
             NUM_WORKERS = max(1, os.cpu_count() // 2)
