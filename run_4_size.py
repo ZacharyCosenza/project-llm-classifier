@@ -58,18 +58,18 @@ def main():
     # Detect and allocate CPU/GPU/XPU and distributed GPU
     if torch.cuda.is_available():
         NUM_GPUS = torch.cuda.device_count()
+    if NUM_GPUS == 1:
         DEVICE = torch.device("cuda")
+    elif NUM_GPUS > 1:
+        DEVICE = int(os.environ["LOCAL_RANK"])
+        acc = torch.accelerator.current_accelerator()
+        backend = torch.distributed.get_default_backend_for_device(acc)
+        dist.init_process_group(backend, rank=DEVICE)
     else:
-        NUM_GPUS = 0
         DEVICE = torch.device(
             "xpu" if hasattr(torch, "xpu") and torch.xpu.is_available() else "cpu"
         )
-        rank = 0
-    if NUM_GPUS > 0:
-        dist.init_process_group("nccl")
-        rank = int(os.environ["LOCAL_RANK"])
-        torch.cuda.set_device(rank)
-
+            
     if SMOKE_TEST:
         BATCH_SIZE = 1
     else:
@@ -148,11 +148,9 @@ def main():
 
         base_model = get_base_model(model_class)
         model = ResponseScorer(base_model)
+        model = model.to(DEVICE)
         if NUM_GPUS > 0: 
-            model = model.to(rank)
-            model = DDP(model, device_ids=[rank])
-        else:
-            model = model.to(DEVICE)
+            model = DDP(model, device_ids=[DEVICE])            
         
         start_epoch = 1
         latest_ckpt = None
@@ -183,11 +181,6 @@ def main():
         # ----------------------------
         # Training
         # ----------------------------
-        
-        if NUM_GPUS > 0:
-            obj = rank
-        else:
-            obj = DEVICE
 
         if not goto_test_only:
             train_stats, val_stats = [], []
@@ -203,11 +196,11 @@ def main():
 
                 for batch in train_pbar:
                     optimizer.zero_grad()
-                    ids_a = batch["input_ids_a"].to(obj)
-                    mask_a = batch["attention_mask_a"].to(obj)
-                    ids_b = batch["input_ids_b"].to(obj)
-                    mask_b = batch["attention_mask_b"].to(obj)
-                    labels = batch["label"].to(obj)
+                    ids_a = batch["input_ids_a"].to(DEVICE)
+                    mask_a = batch["attention_mask_a"].to(DEVICE)
+                    ids_b = batch["input_ids_b"].to(DEVICE)
+                    mask_b = batch["attention_mask_b"].to(DEVICE)
+                    labels = batch["label"].to(DEVICE)
 
                     logits = model(ids_a, mask_a, ids_b, mask_b)
                     loss = loss_fn(logits, labels)
@@ -232,11 +225,11 @@ def main():
                 with torch.no_grad():
                     val_pbar = tqdm(val_loader, desc=f"Val {epoch}", leave=False)
                     for batch in val_pbar:
-                        ids_a = batch["input_ids_a"].to(obj)
-                        mask_a = batch["attention_mask_a"].to(obj)
-                        ids_b = batch["input_ids_b"].to(obj)
-                        mask_b = batch["attention_mask_b"].to(obj)
-                        labels = batch["label"].to(obj)
+                        ids_a = batch["input_ids_a"].to(DEVICE)
+                        mask_a = batch["attention_mask_a"].to(DEVICE)
+                        ids_b = batch["input_ids_b"].to(DEVICE)
+                        mask_b = batch["attention_mask_b"].to(DEVICE)
+                        labels = batch["label"].to(DEVICE)
 
                         logits = model(ids_a, mask_a, ids_b, mask_b)
                         loss = loss_fn(logits, labels)
@@ -260,12 +253,12 @@ def main():
                 train_stats.append({"epoch": epoch, "loss": avg_train})
                 val_stats.append({"epoch": epoch, "loss": avg_val, "acc": val_acc})
 
-                if not SMOKE_TEST and (NUM_GPUS == 0 or rank == 0):
+                if not SMOKE_TEST and (NUM_GPUS == 0 or DEVICE == 0):
                     ckpt_path = os.path.join(CKPT_DIR, f"epoch{epoch}.pt")
                     torch.save(model.state_dict(), ckpt_path)
                     log(f"Saved checkpoint {ckpt_path}")
 
-            if not SMOKE_TEST and (NUM_GPUS == 0 or rank == 0):
+            if not SMOKE_TEST and (NUM_GPUS == 0 or DEVICE == 0):
                 pd.DataFrame(train_stats).to_csv(os.path.join(CKPT_DIR, "train.csv"), index=False)
                 pd.DataFrame(val_stats).to_csv(os.path.join(CKPT_DIR, "val.csv"), index=False)
                 log("Saved training CSVs.")
@@ -281,11 +274,11 @@ def main():
         with torch.no_grad():
             test_pbar = tqdm(test_loader, desc="Test", leave=False)
             for batch in test_pbar:
-                ids_a = batch["input_ids_a"].to(obj)
-                mask_a = batch["attention_mask_a"].to(obj)
-                ids_b = batch["input_ids_b"].to(obj)
-                mask_b = batch["attention_mask_b"].to(obj)
-                labels = batch["label"].to(obj)
+                ids_a = batch["input_ids_a"].to(DEVICE)
+                mask_a = batch["attention_mask_a"].to(DEVICE)
+                ids_b = batch["input_ids_b"].to(DEVICE)
+                mask_b = batch["attention_mask_b"].to(DEVICE)
+                labels = batch["label"].to(DEVICE)
 
                 logits = model(ids_a, mask_a, ids_b, mask_b)
                 loss = loss_fn(logits, labels)
@@ -306,7 +299,7 @@ def main():
         test_acc = correct / (1 if SMOKE_TEST else total)
         log(f"Test done. Loss={avg_test_loss:.4f}, Acc={test_acc:.4f}")
 
-        if not SMOKE_TEST and (NUM_GPUS == 0 or rank == 0):
+        if not SMOKE_TEST and (NUM_GPUS == 0 or DEVICE == 0):
             pd.DataFrame(test_stats).to_csv(os.path.join(CKPT_DIR, "test.csv"), index=False)
 
         log("=== RUN COMPLETE ===")
