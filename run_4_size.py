@@ -9,6 +9,9 @@ from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
 from transformers import BertTokenizer, BertModel, DistilBertTokenizer, DistilBertModel
 from tqdm import tqdm
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
 
 # ------------------------------------------------------------
 # Argparse
@@ -22,7 +25,6 @@ def get_args():
     ap.add_argument("--base_model", type=str)
     ap.add_argument("--tag", type=str, default='')
     return ap.parse_args()
-
 
 # ------------------------------------------------------------
 # Script
@@ -39,8 +41,6 @@ def main():
     MAX_LEN = 512
 
     # Base LLM models
-    # distilbert-base-uncased
-    # bert-base-uncased
     BASE_MODEL = args.base_model
     if BASE_MODEL == 'distilbert-base-uncased':
         model_class = DistilBertModel
@@ -50,13 +50,30 @@ def main():
         tokenizer_class = BertTokenizer
     tokenizer = tokenizer_class.from_pretrained(BASE_MODEL)
 
-    BATCH_SIZE = 1 if SMOKE_TEST else args.batch
     NUM_EPOCHS = 1 if SMOKE_TEST else args.epochs
 
-    DEVICE = torch.device(
-        "cuda" if torch.cuda.is_available() else
-        ("xpu" if hasattr(torch, "xpu") and torch.xpu.is_available() else "cpu")
-    )
+    # Detect and allocate CPU/GPU/XPU and distributed GPU
+    if torch.cuda.is_available():
+        NUM_GPUS = torch.cuda.device_count()
+        DEVICE = torch.device("cuda")
+    else:
+        NUM_GPUS = 0
+        DEVICE = torch.device(
+            "xpu" if hasattr(torch, "xpu") and torch.xpu.is_available() else "cpu"
+        )
+        rank = 0
+    if NUM_GPUS > 0:
+        dist.init_process_group("nccl")
+        rank = int(os.environ["LOCAL_RANK"])
+        torch.cuda.set_device(rank)
+
+    if SMOKE_TEST:
+        BATCH_SIZE = 1
+    else:
+        if NUM_GPUS > 0:
+            BATCH_SIZE = max(1, args.batch // NUM_GPUS)
+        else:
+            BATCH_SIZE = args.batch
 
     # determine checkpoint directory (new run or resume)
     if args.resume_timestamp is None:
@@ -85,7 +102,6 @@ def main():
         # ----------------------------
         log("Loading dataset...")
         df = pd.read_csv(DATA_PATH)
-        
 
         class ResponseDataset(Dataset):
             def __init__(self, df):
@@ -123,9 +139,25 @@ def main():
         df_train, df_temp = train_test_split(df, test_size=0.2, random_state=42)
         df_val, df_test = train_test_split(df_temp, test_size=0.5, random_state=42)
 
-        train_loader = DataLoader(ResponseDataset(df_train), batch_size=BATCH_SIZE, shuffle=True)
-        val_loader = DataLoader(ResponseDataset(df_val), batch_size=BATCH_SIZE, shuffle=False)
-        test_loader = DataLoader(ResponseDataset(df_test), batch_size=BATCH_SIZE, shuffle=False)
+        train_dataset = ResponseDataset(df_train)
+        val_dataset = ResponseDataset(df_val)
+        test_dataset = ResponseDataset(df_test)
+
+        if NUM_GPUS > 0:
+            train_sampler = DistributedSampler(train_dataset)
+            val_sampler = DistributedSampler(val_dataset, shuffle=False)
+            test_sampler = DistributedSampler(test_dataset, shuffle=False)
+            NUM_WORKERS = max(1, os.cpu_count() // 2)
+            train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, 
+                                      sampler=train_sampler, pin_memory=True, num_workers=NUM_WORKERS)
+            val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, 
+                                    sampler=val_sampler, pin_memory=True, num_workers=NUM_WORKERS)
+            test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, 
+                                     sampler=test_sampler, pin_memory=True, num_workers=NUM_WORKERS)
+        else:
+            train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+            val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
+            test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
         log("Dataset ready.")
 
@@ -176,7 +208,12 @@ def main():
                             self.encode(ids_b, mask_b)], dim=-1)
                 return self.head(h)
 
-        model = ResponseScorer(base_model).to(DEVICE)
+        model = ResponseScorer(base_model)
+        if NUM_GPUS > 0: 
+            model = model.to(rank)
+            model = DDP(model, device_ids=[rank])
+        else:
+            model = model.to(DEVICE)
         
         start_epoch = 1
         latest_ckpt = None
@@ -215,6 +252,9 @@ def main():
                 model.train()
                 running_loss = 0
                 train_pbar = tqdm(train_loader, desc=f"Train {epoch}", leave=False)
+
+                if NUM_GPUS > 0:
+                    train_sampler.set_epoch(epoch)
 
                 for batch in train_pbar:
                     optimizer.zero_grad()
@@ -275,12 +315,12 @@ def main():
                 train_stats.append({"epoch": epoch, "loss": avg_train})
                 val_stats.append({"epoch": epoch, "loss": avg_val, "acc": val_acc})
 
-                if not SMOKE_TEST:
+                if not SMOKE_TEST and (NUM_GPUS == 0 or rank == 0):
                     ckpt_path = os.path.join(CKPT_DIR, f"epoch{epoch}.pt")
                     torch.save(model.state_dict(), ckpt_path)
                     log(f"Saved checkpoint {ckpt_path}")
 
-            if not SMOKE_TEST:
+            if not SMOKE_TEST and (NUM_GPUS == 0 or rank == 0):
                 pd.DataFrame(train_stats).to_csv(os.path.join(CKPT_DIR, "train.csv"), index=False)
                 pd.DataFrame(val_stats).to_csv(os.path.join(CKPT_DIR, "val.csv"), index=False)
                 log("Saved training CSVs.")
@@ -321,7 +361,7 @@ def main():
         test_acc = correct / (1 if SMOKE_TEST else total)
         log(f"Test done. Loss={avg_test_loss:.4f}, Acc={test_acc:.4f}")
 
-        if not SMOKE_TEST:
+        if not SMOKE_TEST and (NUM_GPUS == 0 or rank == 0):
             pd.DataFrame(test_stats).to_csv(os.path.join(CKPT_DIR, "test.csv"), index=False)
 
         log("=== RUN COMPLETE ===")
@@ -332,7 +372,6 @@ def main():
             f.write("\nERROR:\n" + err)
         print(err)
         raise
-
 
 if __name__ == "__main__":
     main()
