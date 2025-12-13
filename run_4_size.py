@@ -58,16 +58,17 @@ def main():
     # Detect and allocate CPU/GPU/XPU and distributed GPU
     if torch.cuda.is_available():
         NUM_GPUS = torch.cuda.device_count()
-    if NUM_GPUS == 1:
+    if "LOCAL_RANK" in os.environ:
         DEVICE = int(os.environ["LOCAL_RANK"])
         acc = torch.accelerator.current_accelerator()
         backend = torch.distributed.get_default_backend_for_device(acc)
         dist.init_process_group(backend, rank=DEVICE)
+    elif NUM_GPUS >= 1:
+        DEVICE = torch.device("cuda")
     else:
         DEVICE = torch.device(
             "xpu" if hasattr(torch, "xpu") and torch.xpu.is_available() else "cpu"
-        )
-            
+        ) 
     if SMOKE_TEST:
         BATCH_SIZE = 1
     else:
@@ -148,7 +149,7 @@ def main():
         model = ResponseScorer(base_model)
         model = model.to(DEVICE)
         if NUM_GPUS > 0: 
-            model = DDP(model, device_ids=[DEVICE])            
+            model = DDP(model, device_ids=[DEVICE], find_unused_parameters=True)         
         
         start_epoch = 1
         latest_ckpt = None
