@@ -56,26 +56,33 @@ def main():
     NUM_EPOCHS = 1 if SMOKE_TEST else args.epochs
 
     # Detect and allocate CPU/GPU/XPU and distributed GPU
-    if torch.cuda.is_available():
-        NUM_GPUS = torch.cuda.device_count()
+    NUM_GPUS = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    
     if "LOCAL_RANK" in os.environ:
         DEVICE = int(os.environ["LOCAL_RANK"])
         torch.cuda.set_device(DEVICE)
         dist.init_process_group(backend="gloo")
         USE_DDP = True
+        WORLD_SIZE = dist.get_world_size()
+        RANK = dist.get_rank()
     elif NUM_GPUS >= 1:
         DEVICE = torch.device("cuda")
         USE_DDP = False
+        WORLD_SIZE = 1
+        RANK = 0
     else:
         DEVICE = torch.device(
             "xpu" if hasattr(torch, "xpu") and torch.xpu.is_available() else "cpu"
         )
         USE_DDP = False
+        WORLD_SIZE = 1
+        RANK = 0
+        
     if SMOKE_TEST:
         BATCH_SIZE = 1
     else:
         if USE_DDP:
-            BATCH_SIZE = max(1, args.batch // NUM_GPUS)
+            BATCH_SIZE = max(1, args.batch // WORLD_SIZE)
         else:
             BATCH_SIZE = args.batch
 
@@ -88,18 +95,28 @@ def main():
         CKPT_DIR = os.path.join(ROOT_CKPT, TIMESTAMP)
         if not os.path.isdir(CKPT_DIR):
             raise ValueError(f"Checkpoint directory {CKPT_DIR} does not exist.")
-    os.makedirs(CKPT_DIR, exist_ok=True)
-    os.makedirs(WEIGHTS_DIR, exist_ok=True)
+    
+    # Only rank 0 creates directories
+    if RANK == 0:
+        os.makedirs(CKPT_DIR, exist_ok=True)
+        os.makedirs(WEIGHTS_DIR, exist_ok=True)
+    
+    if USE_DDP:
+        dist.barrier()  # Wait for rank 0 to create directories
 
     log_path = os.path.join(CKPT_DIR, "run.log")
-    def log(msg):
-        print(msg)
-        with open(log_path, "a") as f:
-            f.write(msg + "\n")
+    
+    def log(msg, rank_specific=False):
+        """Log message. If rank_specific=False, only rank 0 logs."""
+        if rank_specific or RANK == 0:
+            print(msg)
+            if RANK == 0:  # Only rank 0 writes to file
+                with open(log_path, "a") as f:
+                    f.write(msg + "\n")
 
     try:
-        log("=== START RUN ===")
-        log(f"device={DEVICE}, smoke={SMOKE_TEST}")
+        log(f"=== START RUN (Rank {RANK}/{WORLD_SIZE}) ===", rank_specific=True)
+        log(f"device={DEVICE}, smoke={SMOKE_TEST}, world_size={WORLD_SIZE}")
 
         # ----------------------------
         # Load data
@@ -116,10 +133,10 @@ def main():
         test_dataset = ResponseDataset(df_test, tokenizer, MAX_LEN)
 
         if USE_DDP:
-            train_sampler = DistributedSampler(train_dataset, shuffle=False)
+            train_sampler = DistributedSampler(train_dataset, shuffle=True)
             val_sampler = DistributedSampler(val_dataset, shuffle=False)
             test_sampler = DistributedSampler(test_dataset, shuffle=False)
-            NUM_WORKERS = max(1, os.cpu_count() // 2)
+            NUM_WORKERS = max(1, os.cpu_count() // WORLD_SIZE // 2)
             train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, 
                                       sampler=train_sampler, pin_memory=True, num_workers=NUM_WORKERS)
             val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, 
@@ -139,31 +156,29 @@ def main():
         def get_base_model(model_class):
             try:
                 if os.path.exists(os.path.join(WEIGHTS_DIR, "pytorch_model.bin")):
-                    log(f"Rank {dist.get_rank() if dist.is_initialized() else 'N/A'}: Loading local base model from {WEIGHTS_DIR}")
+                    log(f"Loading local base model from {WEIGHTS_DIR}", rank_specific=True)
                     model = model_class.from_pretrained(WEIGHTS_DIR)
                 else:
-                    log(f"Rank {dist.get_rank() if dist.is_initialized() else 'N/A'}: Downloading pretrained base model...")
+                    log(f"Downloading pretrained base model...", rank_specific=True)
                     model = model_class.from_pretrained(BASE_MODEL)
                     # Only rank 0 should save to avoid race conditions
-                    if not SMOKE_TEST and (not dist.is_initialized() or dist.get_rank() == 0):
+                    if not SMOKE_TEST and RANK == 0:
                         model.save_pretrained(WEIGHTS_DIR)
                         log("Saved base model.")
                 
-                # Verify model loaded correctly
                 num_params = sum(p.numel() for p in model.parameters())
-                log(f"Rank {dist.get_rank() if dist.is_initialized() else 'N/A'}: Base model loaded with {num_params} parameters")
+                log(f"Base model loaded with {num_params} parameters", rank_specific=True)
                 
                 return model
             except Exception as e:
-                log(f"Rank {dist.get_rank() if dist.is_initialized() else 'N/A'}: ERROR loading base model: {e}")
+                log(f"ERROR loading base model: {e}", rank_specific=True)
                 raise
 
         base_model = get_base_model(model_class)
 
-        # Add barrier to ensure all ranks finish loading before proceeding
         if USE_DDP:
             dist.barrier()
-            log(f"Rank {dist.get_rank()}: Passed barrier after model loading")
+            log("All ranks passed barrier after model loading")
 
         model = ResponseScorer(base_model)
 
@@ -173,27 +188,37 @@ def main():
 
         model = model.to(DEVICE)
 
-        # Verify model on device
         num_params = sum(p.numel() for p in model.parameters())
-        log(f"Rank {dist.get_rank() if USE_DDP else 'N/A'}: ResponseScorer has {num_params} parameters before DDP")
+        log(f"ResponseScorer has {num_params} parameters")
 
         if USE_DDP:
-            model = DDP(model, device_ids=[DEVICE], find_unused_parameters=True)     
+            model = DDP(model, device_ids=[DEVICE], find_unused_parameters=True)
         
         start_epoch = 1
         latest_ckpt = None
 
-        if args.resume_timestamp is not None:
+        if args.resume_timestamp is not None and RANK == 0:
             files = [f for f in os.listdir(CKPT_DIR) if f.startswith("epoch") and f.endswith(".pt")]
             if len(files) > 0:
-                # sort by epoch number
                 files.sort(key=lambda x: int(x.replace("epoch", "").replace(".pt", "")))
                 latest_ckpt = files[-1]
                 start_epoch = int(latest_ckpt.replace("epoch", "").replace(".pt", "")) + 1
                 log(f"Resuming from {latest_ckpt}, starting at epoch {start_epoch}")
-                model.load_state_dict(torch.load(os.path.join(CKPT_DIR, latest_ckpt), map_location=DEVICE))
+                
+                # Load checkpoint
+                checkpoint = torch.load(os.path.join(CKPT_DIR, latest_ckpt), map_location=DEVICE)
+                if USE_DDP:
+                    model.module.load_state_dict(checkpoint)
+                else:
+                    model.load_state_dict(checkpoint)
             else:
                 log("Resume timestamp given, but no checkpoints found. Starting from scratch.")
+        
+        if USE_DDP:
+            # Broadcast start_epoch to all ranks
+            start_epoch_tensor = torch.tensor(start_epoch).to(DEVICE)
+            dist.broadcast(start_epoch_tensor, src=0)
+            start_epoch = start_epoch_tensor.item()
   
         optimizer = torch.optim.AdamW(model.parameters(), lr=LR)
         loss_fn = nn.CrossEntropyLoss()
@@ -217,7 +242,12 @@ def main():
                 log(f"Epoch {epoch} starting...")
                 model.train()
                 running_loss = 0
-                train_pbar = tqdm(train_loader, desc=f"Train {epoch}", leave=False)
+                
+                # Only show progress bar on rank 0
+                if RANK == 0:
+                    train_pbar = tqdm(train_loader, desc=f"Train {epoch}", leave=False)
+                else:
+                    train_pbar = train_loader
 
                 if USE_DDP:
                     train_sampler.set_epoch(epoch)
@@ -235,23 +265,37 @@ def main():
                     loss.backward()
                     optimizer.step()
 
-                    # ---- per-batch metrics ----
-                    preds = logits.argmax(dim=-1)
-                    acc = (preds == labels).float().mean().item()
                     running_loss += loss.item()
 
                     if SMOKE_TEST:
                         break
-                        
-                    train_pbar.set_postfix(loss=loss.item(), acc=acc)
+                    
+                    # Update progress bar only on rank 0
+                    if RANK == 0:
+                        preds = logits.argmax(dim=-1)
+                        acc = (preds == labels).float().mean().item()
+                        train_pbar.set_postfix(loss=loss.item(), acc=acc)
 
-                avg_train = running_loss / (1 if SMOKE_TEST else len(train_loader))
+                # Aggregate training loss across all GPUs
+                if USE_DDP:
+                    train_loss_tensor = torch.tensor(running_loss).to(DEVICE)
+                    dist.all_reduce(train_loss_tensor, op=dist.ReduceOp.SUM)
+                    running_loss = train_loss_tensor.item()
+                
+                avg_train = running_loss / (1 if SMOKE_TEST else len(train_loader) * WORLD_SIZE)
 
-                # validation
+                # ----------------------------
+                # Validation
+                # ----------------------------
                 model.eval()
                 val_loss, correct, total = 0, 0, 0
+                
                 with torch.no_grad():
-                    val_pbar = tqdm(val_loader, desc=f"Val {epoch}", leave=False)
+                    if RANK == 0:
+                        val_pbar = tqdm(val_loader, desc=f"Val {epoch}", leave=False)
+                    else:
+                        val_pbar = val_loader
+                        
                     for batch in val_pbar:
                         ids_a = batch["input_ids_a"].to(DEVICE)
                         mask_a = batch["attention_mask_a"].to(DEVICE)
@@ -266,27 +310,45 @@ def main():
                         val_loss += loss.item()
                         correct += (preds == labels).sum().item()
                         total += labels.size(0)
-                        batch_acc = (preds == labels).float().mean().item()
 
                         if SMOKE_TEST:
                             break
 
-                        val_pbar.set_postfix(loss=loss.item(), acc=batch_acc)
+                        if RANK == 0:
+                            batch_acc = (preds == labels).float().mean().item()
+                            val_pbar.set_postfix(loss=loss.item(), acc=batch_acc)
 
-                avg_val = val_loss / (1 if SMOKE_TEST else len(val_loader))
+                # Aggregate metrics across all GPUs
+                if USE_DDP:
+                    val_loss_tensor = torch.tensor(val_loss).to(DEVICE)
+                    correct_tensor = torch.tensor(correct).to(DEVICE)
+                    total_tensor = torch.tensor(total).to(DEVICE)
+                    
+                    dist.all_reduce(val_loss_tensor, op=dist.ReduceOp.SUM)
+                    dist.all_reduce(correct_tensor, op=dist.ReduceOp.SUM)
+                    dist.all_reduce(total_tensor, op=dist.ReduceOp.SUM)
+                    
+                    val_loss = val_loss_tensor.item()
+                    correct = correct_tensor.item()
+                    total = total_tensor.item()
+
+                avg_val = val_loss / (1 if SMOKE_TEST else len(val_loader) * WORLD_SIZE)
                 val_acc = correct / total
 
                 log(f"Epoch {epoch} done. Train={avg_train:.4f}, Val={avg_val:.4f}, Acc={val_acc:.4f}")
 
-                train_stats.append({"epoch": epoch, "loss": avg_train})
-                val_stats.append({"epoch": epoch, "loss": avg_val, "acc": val_acc})
+                if RANK == 0:
+                    train_stats.append({"epoch": epoch, "loss": avg_train})
+                    val_stats.append({"epoch": epoch, "loss": avg_val, "acc": val_acc})
 
-                if not SMOKE_TEST and (NUM_GPUS == 0 or DEVICE == 0):
-                    ckpt_path = os.path.join(CKPT_DIR, f"epoch{epoch}.pt")
-                    torch.save(model.state_dict(), ckpt_path)
-                    log(f"Saved checkpoint {ckpt_path}")
+                    if not SMOKE_TEST:
+                        ckpt_path = os.path.join(CKPT_DIR, f"epoch{epoch}.pt")
+                        # Save model.module for DDP, model for non-DDP
+                        state_dict = model.module.state_dict() if USE_DDP else model.state_dict()
+                        torch.save(state_dict, ckpt_path)
+                        log(f"Saved checkpoint {ckpt_path}")
 
-            if not SMOKE_TEST and (NUM_GPUS == 0 or DEVICE == 0):
+            if RANK == 0 and not SMOKE_TEST:
                 pd.DataFrame(train_stats).to_csv(os.path.join(CKPT_DIR, "train.csv"), index=False)
                 pd.DataFrame(val_stats).to_csv(os.path.join(CKPT_DIR, "val.csv"), index=False)
                 log("Saved training CSVs.")
@@ -300,7 +362,11 @@ def main():
         test_stats = []
 
         with torch.no_grad():
-            test_pbar = tqdm(test_loader, desc="Test", leave=False)
+            if RANK == 0:
+                test_pbar = tqdm(test_loader, desc="Test", leave=False)
+            else:
+                test_pbar = test_loader
+                
             for batch in test_pbar:
                 ids_a = batch["input_ids_a"].to(DEVICE)
                 mask_a = batch["attention_mask_a"].to(DEVICE)
@@ -316,28 +382,44 @@ def main():
                 correct += (preds == labels).sum().item()
                 total += labels.size(0)
 
-                # ---- per-batch metrics ----
-                acc = (preds == labels).float().mean().item()
-                test_stats.append({"loss": loss.item(), "acc": acc})
-
                 if SMOKE_TEST:
                     break
 
-        avg_test_loss = test_loss / (1 if SMOKE_TEST else len(test_loader))
-        test_acc = correct / (1 if SMOKE_TEST else total)
+        # Aggregate test metrics across all GPUs
+        if USE_DDP:
+            test_loss_tensor = torch.tensor(test_loss).to(DEVICE)
+            correct_tensor = torch.tensor(correct).to(DEVICE)
+            total_tensor = torch.tensor(total).to(DEVICE)
+            
+            dist.all_reduce(test_loss_tensor, op=dist.ReduceOp.SUM)
+            dist.all_reduce(correct_tensor, op=dist.ReduceOp.SUM)
+            dist.all_reduce(total_tensor, op=dist.ReduceOp.SUM)
+            
+            test_loss = test_loss_tensor.item()
+            correct = correct_tensor.item()
+            total = total_tensor.item()
+
+        avg_test_loss = test_loss / (1 if SMOKE_TEST else len(test_loader) * WORLD_SIZE)
+        test_acc = correct / total
+        
         log(f"Test done. Loss={avg_test_loss:.4f}, Acc={test_acc:.4f}")
 
-        if not SMOKE_TEST and (NUM_GPUS == 0 or DEVICE == 0):
+        if RANK == 0 and not SMOKE_TEST:
+            # Save per-batch stats from rank 0 only
             pd.DataFrame(test_stats).to_csv(os.path.join(CKPT_DIR, "test.csv"), index=False)
 
         log("=== RUN COMPLETE ===")
 
     except Exception as e:
         err = traceback.format_exc()
-        with open(log_path, "a") as f:
-            f.write("\nERROR:\n" + err)
-        print(err)
+        if RANK == 0:
+            with open(log_path, "a") as f:
+                f.write("\nERROR:\n" + err)
+        print(f"[Rank {RANK}] ERROR: {err}")
         raise
+    finally:
+        if USE_DDP:
+            dist.destroy_process_group()
 
 if __name__ == "__main__":
     main()

@@ -34,3 +34,4 @@ For experiment set 2, using  bert models:
 - distilbert: 47.3%
 - bert: 46.76%
 - large bert: 
+- large bert (frozen base, lr = 2e-5, epochs = 10)
