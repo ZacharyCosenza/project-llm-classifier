@@ -33,5 +33,5 @@ Clearly training on more parameters has a positive effect on accuracy. As a next
 For experiment set 2, using  bert models:
 - distilbert: 47.3%
 - bert: 46.76%
-- large bert: 
+- large bert: 48.43%
 - large bert (frozen base, lr = 2e-5, epochs = 10)
