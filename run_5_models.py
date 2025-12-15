@@ -8,13 +8,14 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
 from transformers import (
-    BertTokenizer, BertModel,
-    DistilBertTokenizer, DistilBertModel,
-    RobertaTokenizer, RobertaModel,
-    ElectraTokenizer, ElectraModel,
-    DebertaTokenizer, DebertaModel,
-    AlbertTokenizer, AlbertModel
+    BertModel, BertTokenizer,
+    DistilBertModel, DistilBertTokenizer,
+    RobertaModel, RobertaTokenizer,
+    ElectraModel, ElectraTokenizerFast,
+    DebertaModel, DebertaTokenizer,
+    AlbertModel, AlbertTokenizer,
 )
+from transformers import AutoTokenizer
 from tqdm import tqdm
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -24,23 +25,16 @@ from torch.utils.data.distributed import DistributedSampler
 from core import ResponseDataset, ResponseScorer
 
 MODEL_REGISTRY = {
-    # BERT family
     "bert-base-uncased": (BertModel, BertTokenizer),
-    "bert-large-uncased": (BertModel, BertTokenizer),
-
-    # DistilBERT
     "distilbert-base-uncased": (DistilBertModel, DistilBertTokenizer),
-
-    # RoBERTa
     "roberta-base": (RobertaModel, RobertaTokenizer),
 
     # ELECTRA
-    "electra-base-discriminator": (ElectraModel, ElectraTokenizer),
+    "google/electra-base-discriminator": (ElectraModel, ElectraTokenizerFast),
 
     # DeBERTa
-    "deberta-base": (DebertaModel, DebertaTokenizer),
+    "microsoft/deberta-base": (DebertaModel, DebertaTokenizer),
 
-    # ALBERT
     "albert-base-v2": (AlbertModel, AlbertTokenizer),
 }
 
@@ -81,7 +75,8 @@ def main():
         )
 
     model_class, tokenizer_class = MODEL_REGISTRY[BASE_MODEL]
-    tokenizer = tokenizer_class.from_pretrained(BASE_MODEL)
+    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
+    # tokenizer = tokenizer_class.from_pretrained(BASE_MODEL)
 
     NUM_EPOCHS = 1 if SMOKE_TEST else args.epochs
 
