@@ -42,13 +42,14 @@ class ResponseScorer(nn.Module):
         super().__init__()
         self.base = base
 
-        # Model specific parameters
-        if isinstance(self.base, DistilBertModel):
-            hidden = self.base.config.dim
-        elif isinstance(self.base, BertModel):
-            hidden = self.base.config.hidden_size
-        else:
-            raise TypeError(f"Unsupported base model type: {type(self.base)}")
+        # # Model specific parameters
+        # if isinstance(self.base, DistilBertModel):
+        #     hidden = self.base.config.dim
+        # elif isinstance(self.base, BertModel):
+        #     hidden = self.base.config.hidden_size
+        # else:
+        #     raise TypeError(f"Unsupported base model type: {type(self.base)}")
+        hidden = self.base.config.hidden_size
 
         self.head = nn.Sequential(
             nn.Linear(hidden * 2, hidden),

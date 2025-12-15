@@ -28,10 +28,21 @@ For experiment set 1 using distilbert-base-uncased:
 - fully frozen: 45.3%
 - bottom frozen: 46.9%
 
-Clearly training on more parameters has a positive effect on accuracy. As a next step we are trying out models with greater raw capacity such as BERT and a larger BERT. I also have started to organize the codebase now that some experiments are more steady (moving dataloader and model classes to core.py).
+Clearly training on more parameters has a positive effect on accuracy. As a next step we are trying out models with greater raw capacity such as BERT and a large BERT. I also have started to organize the codebase now that some experiments are more steady (moving dataloader and model classes to core.py). Running these experiments took far more time than a 1XA40 could handle so I upgraded to 4XA40 which required some infrastructure changes and use of tmux to run sessions while I was out. For future reference I needed to make the following changes to the code for DDS (multi-GPU for torch):
 
-For experiment set 2, using  bert models:
+1. Run with torchrun --nproc_per_node=4 python_script.py...
+2. Get local ranks and set some communications parameters
+        DEVICE = int(os.environ["LOCAL_RANK"])
+        torch.cuda.set_device(DEVICE)
+        dist.init_process_group(backend="gloo")
+3. Modify BATCH_SIZE = max(1, args.batch // WORLD_SIZE)
+4. Only save and log if RANK == 0 (main process)
+5. if USE_DDP: dist.barrier() was needed to make sure RANK == 0 goes first
+6. Wrap dataloaders in DistributedSampler and model in if model = DDP(model, device_ids=[DEVICE], find_unused_parameters=True). This turned out to be critical as my LLM implementation does not run some parameters during inference.
+7. dist.broadcast(start_epoch_tensor, src=0) and train_sampler.set_epoch(epoch) needed during training.
+8. dist.all_reduce(val_loss_tensor, op=dist.ReduceOp.SUM) needed for non-training calculations
+
+For experiment set 2, using bert models to study size, we found some improvement by going with larger models:
 - distilbert: 47.3%
-- bert: 46.76%
+- bert: 48.35%
 - large bert: 48.43%
-- large bert (frozen base, lr = 2e-5, epochs = 10)
