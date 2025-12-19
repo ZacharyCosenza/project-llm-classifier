@@ -124,6 +124,19 @@ def get_args():
 def main():
     args = get_args()
 
+    # Set matmul precision for better performance on modern GPUs
+    torch.set_float32_matmul_precision('medium')
+
+    # Helper to print only from rank 0
+    def rank_zero_print(*args_print, **kwargs):
+        # Check if we're in distributed mode
+        if 'LOCAL_RANK' in os.environ:
+            local_rank = int(os.environ['LOCAL_RANK'])
+            if local_rank == 0:
+                print(*args_print, **kwargs)
+        else:
+            print(*args_print, **kwargs)
+
     SMOKE_TEST, BASE_MODEL, TAG = args.smoke, args.base_model, args.tag
     DATA_PATH = 'data/train.csv'
     WEIGHTS_DIR = os.path.join('weights', BASE_MODEL)
@@ -152,9 +165,9 @@ def main():
     os.makedirs(CKPT_DIR, exist_ok=True)
     os.makedirs(WEIGHTS_DIR, exist_ok=True)
 
-    print(f"=== START LIGHTNING RUN ===")
-    print(f"smoke={SMOKE_TEST}, epochs={NUM_EPOCHS}, batch_size={BATCH_SIZE}")
-    print("Loading dataset...")
+    rank_zero_print(f"=== START LIGHTNING RUN ===")
+    rank_zero_print(f"smoke={SMOKE_TEST}, epochs={NUM_EPOCHS}, batch_size={BATCH_SIZE}")
+    rank_zero_print("Loading dataset...")
 
     # Load and split dataset
     df = pd.read_csv(DATA_PATH)
@@ -192,7 +205,7 @@ def main():
         pin_memory=torch.cuda.is_available()
     )
 
-    print("Dataset ready.")
+    rank_zero_print("Dataset ready.")
 
     # Initialize model
     model = LightningResponseScorer(
@@ -203,7 +216,7 @@ def main():
         smoke_test=SMOKE_TEST
     )
 
-    print(f"ResponseScorer has {sum(p.numel() for p in model.parameters())} parameters")
+    rank_zero_print(f"ResponseScorer has {sum(p.numel() for p in model.parameters())} parameters")
 
     # Setup callbacks
     checkpoint_callback = ModelCheckpoint(
@@ -225,19 +238,19 @@ def main():
             ckpt_files.sort(key=lambda x: int(x.replace("epoch", "").replace(".ckpt", "")))
             latest_ckpt = ckpt_files[-1]
             ckpt_path = os.path.join(CKPT_DIR, latest_ckpt)
-            print(f"Resuming from {latest_ckpt}")
+            rank_zero_print(f"Resuming from {latest_ckpt}")
         else:
-            print("Resume timestamp given, but no checkpoints found. Starting from scratch.")
+            rank_zero_print("Resume timestamp given, but no checkpoints found. Starting from scratch.")
 
     # Determine accelerator and devices
     if torch.cuda.is_available():
         accelerator = "gpu"
         devices = args.devices if args.devices is not None else torch.cuda.device_count()
-        print(f"Using GPU acceleration with {devices} device(s)")
+        rank_zero_print(f"Using GPU acceleration with {devices} device(s)")
     else:
         accelerator = "cpu"
         devices = 1  # CPU always uses 1 device in Lightning
-        print("Using CPU")
+        rank_zero_print("Using CPU")
 
     # Adjust strategy for single device
     strategy = args.strategy
@@ -259,14 +272,14 @@ def main():
     )
 
     # Train
-    print("Starting training...")
+    rank_zero_print("Starting training...")
     trainer.fit(model, train_loader, val_loader, ckpt_path=ckpt_path)
 
     # Test
-    print("Testing...")
+    rank_zero_print("Testing...")
     trainer.test(model, test_loader)
 
-    print("=== RUN COMPLETE ===")
+    rank_zero_print("=== RUN COMPLETE ===")
 
 
 if __name__ == "__main__":
