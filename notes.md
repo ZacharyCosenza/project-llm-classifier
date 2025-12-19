@@ -64,3 +64,19 @@ Some ideas for some further optimizations:
 1. Pytorch Lightining
 2. Hyperparameter tuning
 3. Changing data/classifier architecture
+
+Pyotrch Lightining
+# Single GPU/CPU
+python run_6_light.py --epochs 3 --batch 32
+
+# Multiple GPUs with DDP
+python run_6_light.py --epochs 3 --batch 32 --devices 2 --strategy ddp
+
+# CPU only
+python run_6_light.py --epochs 3 --batch 32
+
+# Resume from checkpoint
+python run_6_light.py --resume_timestamp 20231215_120000
+
+# Smoke test
+python run_6_light.py --smoke
