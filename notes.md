@@ -46,3 +46,21 @@ For experiment set 2, using bert models to study size, we found some improvement
 - distilbert: 47.3%
 - bert: 48.35%
 - large bert: 48.43%
+
+For experiment set 3 we will use similar models with different training:
+
+roberta-base: loss function is 15% MLM masking -> 80% of cases replaced with <mask>, 10% replaced by random token, 10% are left, case sensitive english, training data is BookCorpus, English Wikipedia, CC-News, OpenWebText, Stories ~160GB, tokenized using BPE, new docs marked with <s>. 48.6%
+
+google/electra-base-discriminator: a generator LLM creates errors in data, discriminator is binary classified to detect real/fake tokens. 49.3%
+
+microsoft/deberta-base: 35.1%
+
+albert-base-v2: 49.1%
+
+# Optimizations
+
+Some ideas for some further optimizations:
+
+1. Pytorch Lightining
+2. Hyperparameter tuning
+3. Changing data/classifier architecture
