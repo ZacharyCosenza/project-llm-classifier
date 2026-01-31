@@ -7,7 +7,6 @@ source .venv/bin/activate
 python -m pip install --upgrade pip
 pip install numpy pandas matplotlib scikit-learn torch huggingface transformers kaggle hf_transfer lightning
 
-export KAGGLE_API_TOKEN=KGAT_47fa0afab6edd8f9a7856ed3ae7a05c8
 kaggle competitions download -c llm-classification-finetuning
 
 # --- unzip latest download into ./data ---
